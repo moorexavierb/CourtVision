@@ -101,3 +101,35 @@ def test_label_rows():
     xy = np.array([[100, 100], [300, 200], [0, 0]])
     r = pose_row(xy, np.array([0.9, 0.8, 0.1]), (400, 400)).split()
     assert r[0] == "0" and len(r) == 5 + 9 and r[-3:] == ["0", "0", "0"]
+
+
+def test_overlap_and_blur_raise_score():
+    from courtvision.training.mining import overlap_pairs, sharpness
+    boxes = np.array([[0, 0, 10, 20], [5, 0, 15, 20], [100, 100, 110, 120]])
+    assert overlap_pairs(boxes) == 1 and overlap_pairs(boxes[:1]) == 0
+    base = FrameStats(frame=0, players=10, balls=1)
+    assert frame_score(FrameStats(frame=0, players=10, balls=1, overlaps=3)) > frame_score(base)
+    assert frame_score(FrameStats(frame=0, players=10, balls=1, sharpness=20.0)) > frame_score(base)
+    sharp = np.zeros((64, 64), np.uint8)
+    sharp[::2] = 255
+    assert sharpness(sharp) > sharpness(cv2.GaussianBlur(sharp, (9, 9), 3))
+
+
+def test_sportsmot_reading_and_pseudo_label_merge(tmp_path):
+    from courtvision.training.sportsmot import basketball_sequences, merge_gt_and_pseudo, read_gt
+    for name in ["bball_1", "soccer_1"]:
+        (tmp_path / "train" / name / "img1").mkdir(parents=True)
+        (tmp_path / "train" / name / "gt").mkdir()
+        (tmp_path / "train" / name / "gt" / "gt.txt").write_text("1,1,10,20,30,40,1,1,1\n1,2,0,0,5,5,0,1,1\n2,1,11,20,30,40,1,1,1\n")
+    (tmp_path / "splits_txt").mkdir()
+    (tmp_path / "splits_txt" / "basketball.txt").write_text("bball_1\n")
+    seqs = basketball_sequences(str(tmp_path), "train")
+    assert [s.name for s in seqs] == ["bball_1"]
+    gt = read_gt(seqs[0])
+    assert np.allclose(gt[1], [[10, 20, 40, 60]]) and len(gt[2]) == 1  # ignore row dropped
+
+    PLAYER, BALL, REF = 4, 0, 5
+    pred = np.array([[0, 0, 5, 5], [50, 50, 55, 55], [70, 0, 90, 60]])
+    out = merge_gt_and_pseudo(gt[1], pred, [PLAYER, BALL, REF], [0.9, 0.8, 0.7], PLAYER, [BALL, REF])
+    assert out is not None and list(out[1]) == [PLAYER, BALL, REF]  # detector player dropped, GT kept
+    assert merge_gt_and_pseudo(gt[1], pred, [PLAYER, BALL, REF], [0.9, 0.3, 0.7], PLAYER, [BALL, REF]) is None
