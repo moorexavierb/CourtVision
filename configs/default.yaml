@@ -47,9 +47,15 @@ court:
   reject_threshold_m: 1.5     # keypoint fits this far from the tracked mapping are dropped
 
 tracking:
+  camera_compensation: true   # track in camera-stabilised coordinates (needs court.camera_motion's flow), so pans don't break tracks
+  reset_on_cut: true          # new track ids after a camera cut; identities are re-joined in court space below
   relink: true                # join player tracks the tracker split in two (same team, reachable, no overlap)
   relink_max_gap_s: 1.0
   relink_max_speed_mps: 6.0
+  identities: true            # at most 5 ids per team: a player who leaves the frame during a pan gets his id back
+  max_per_team: 5
+  identity_max_gap_s: 10.0
+  identity_max_speed_mps: 8.0
   smooth: true                # remove spikes, fill short gaps, smooth court positions before 3D and metrics
   max_fill_s: 0.5
   smooth_window_s: 0.3

@@ -13,7 +13,10 @@ ball (a possession segment). Each row says:
 * everyone else on the floor at the action frame, as wide columns: teammates
   ``tm1..tm4`` and opponents ``op1..op5``, each nearest-to-the-handler first,
   with id, x, y, speed and distance to the handler
-* ``confidence``: 0-1, how much to trust the row (see ``_confidence``)
+* ``confidence``: 0-1, how much to trust the row (see ``_confidence``), and
+  ``id_confidence``: 0-1, how sure we are that ``player_id`` is one person
+  across the clip (low when a re-join after an occlusion or pan was a close
+  call between teammates)
 
 Positions are court metres (origin at a corner, x along the length), speeds
 are km/h. Rows with no court calibration keep their ids and actions, with the
@@ -211,6 +214,8 @@ def touches_table(possessions: list[Possession], result: PipelineResult, team_na
                 for field in SLOT_FIELDS:
                     row[f"{prefix}{k + 1}_{field}"] = e.get(field)
         row["confidence"] = _confidence(seg, result, se is not None, ee is not None or nxt is None)
+        # how sure we are this id is one person throughout (1 = never re-joined on a close call)
+        row["id_confidence"] = round(result.identity_conf.get(pid, 1.0), 3)
         rows.append(row)
 
     df = pd.DataFrame(rows)

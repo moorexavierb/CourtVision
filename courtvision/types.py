@@ -36,8 +36,16 @@ def bbox_width(b: BBox) -> float:
 
 
 @dataclass
+class RawDetections:
+    """Output of the model pass, before tracking."""
+    people: list[list[dict]]            # frame -> [{"bbox": BBox, "conf": float, "cls": 0 player | 1 referee}]
+    ball_candidates: list[list[dict]]   # frame -> [{"bbox": BBox, "conf": float}, ...]
+    hoops: list[Optional[BBox]]
+
+
+@dataclass
 class DetectionResult:
-    """Raw output of the detection + tracking stage."""
+    """Detections after tracking: players and referees carry track ids."""
     players: PlayerTracks
     referees: PlayerTracks
     ball_candidates: list[list[dict]]   # frame -> [{"bbox": BBox, "conf": float}, ...]
@@ -85,5 +93,9 @@ class PipelineResult:
     calibration: list[dict] = field(default_factory=list)
     # track id -> id it was merged into by re-linking
     track_remap: dict[int, int] = field(default_factory=dict)
+    # identity id -> 0-1 trust in its links (detection.stitch.assign_identities); tracks fitting no identity
+    identity_conf: dict[int, float] = field(default_factory=dict)
+    identity_extras: list[int] = field(default_factory=list)
+    shot_cuts: list[int] = field(default_factory=list)  # frames that start a new camera shot
     diagnostics: Optional[dict] = None
     diagnostics_frames: Optional[object] = None  # pandas DataFrame, one row per frame

@@ -5,14 +5,29 @@ Each stage is a plain function or small class with data in, data out. Only
 geometry and logic, covered by `tests/` without any weights
 (`Pipeline.analyze` is the model-free half).
 
-## 1. Detection and tracking (`detection/tracker.py`)
+## 1. Detection and tracking (`detection/tracker.py`, `detection/tracking.py`)
 
-One YOLO pass per frame finds every class. Players and referees go through
-separate ByteTrack instances (`track_buffer` frames of memory, so a player
-screened in the paint keeps their ID). The ball and hoop are not tracked: all
-ball candidates are kept for the ball stage, and the most confident hoop box
-is kept per frame. An optional second, ball-only model can supply ball
-candidates instead.
+One YOLO pass per frame finds every class; that pass is cached on its own
+(`RawDetections`). The ball and hoop are not tracked: all ball candidates are
+kept for the ball stage, and the most confident hoop box is kept per frame.
+An optional second, ball-only model can supply ball candidates instead.
+
+Players and referees are then tracked together by one ByteTrack
+(`track_buffer` frames of memory, so a player screened in the paint keeps his
+ID), with two changes for broadcast video:
+
+* **Camera compensation.** Every box is mapped into the first frame of its
+  shot through the accumulated camera motion (`court/camera_motion.py`, which
+  now runs before tracking), so the Kalman prediction only has to follow the
+  player's own motion, not the pan. Frames whose motion can't be estimated
+  are treated as a still camera.
+* **Cuts.** At a histogram cut the tracker restarts with fresh IDs, so an ID
+  is never handed to whoever stands at the same screen spot in the next shot.
+  Identities are joined across the cut in court space (below).
+
+Each track's class (player or referee) is a confidence-weighted vote over its
+life, so a player the detector briefly calls a referee keeps his track.
+`tracking.camera_compensation` and `tracking.reset_on_cut` switch these off.
 
 ## 2. Court keypoints, homography, camera (`court/`)
 
@@ -44,11 +59,29 @@ Limits: a shot that never shows 4 landmarks (a close-up, a replay) has no
 court mapping, since there is nothing to carry it from. Adding more landmark types (rim, backboard corners,
 restricted-area arc points) is the main lever for coverage.
 
-## Track re-linking and smoothing (`detection/stitch.py`, `tactical/projector.py`)
+## Track re-linking, identities and smoothing (`detection/stitch.py`, `tactical/projector.py`)
 
 After court projection, a player track that ends is joined to one that starts
 within `relink_max_gap_s` on the same team, never on screen together, and
-reachable at `relink_max_speed_mps`. Court positions are then median-filtered
+reachable at `relink_max_speed_mps`.
+
+Then `assign_identities` uses the fact that a team has five players on the
+floor: tracks, in order of their first frame (as a stream would deliver them),
+take one of at most `max_per_team` identities per team. A track joins a free
+identity (its last track has ended) that it can reach from where that player
+was last seen (`identity_max_speed_mps`, within `identity_max_gap_s`), or opens
+a new one while the team has fewer than five. Link cost is distance over what
+a player covers at a jog; opening a new identity costs the same as a jog-speed
+link, so far-off tracks start new identities until all five are known. Tracks
+that start together (after a cut) are matched jointly (Hungarian). A sixth
+simultaneous track on a team is an "extra" (bench, coach, wrong team) and
+keeps its own ID. Each identity gets a 0-1 confidence, the weakest margin in
+its chain, which the touches table reports as `id_confidence`.
+
+Court position can't tell two teammates apart when both were out of the
+picture for a while; jersey numbers are the missing cue (see Roadmap).
+
+Court positions are then median-filtered
 (spikes from cut-off boxes), short gaps up to `max_fill_s` interpolated, and
 smoothed over `smooth_window_s`. Everything downstream (3D, speed, touches)
 uses the smoothed positions.
@@ -57,7 +90,8 @@ uses the smoothed positions.
 
 Each run writes `diagnostics.json`, `diagnostics_frames.csv` and
 `diagnostics.png`: court mapping coverage and source, keypoints seen and fit
-error, rejected fits, cuts; track counts, short tracks, re-links, feet mapped
+error, rejected fits, cuts; track counts, short tracks, re-links, identities
+per team, weak identities, feet mapped
 off the court, frame-to-frame jumps; team colour separation; ball detection
 and possession rates. Findings name the weakest stage and its fix.
 
@@ -140,7 +174,15 @@ dot view.
 
 ## Roadmap
 
-* Jersey-number OCR to turn track IDs into real players (and re-link IDs after long occlusions).
+* Jersey numbers: a small digit recogniser on torso crops of each track
+  (back and front, sampled where the box is big and sharp), voted per track,
+  then used as a hard constraint in `assign_identities` (same number + team =
+  same identity, different number = never) and joined to the scraped roster
+  for names. Needs labelled number crops from our own broadcast clips (the
+  frame-mining notebook can collect them).
+* Appearance re-ID embeddings (e.g. OSNet) as a softer cue between teammates
+  when numbers aren't readable.
+* Replay detection, so replays don't add duplicate touches.
 * More court landmarks for close-up coverage.
 * Learned 3D lifting or SMPL fitting for player bodies; hand and head detail.
 * Shot outcome from hoop/net motion as a second signal.

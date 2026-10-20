@@ -55,7 +55,7 @@ Outputs land in `output/<video name>/`.
 | File | Contents |
 |---|---|
 | `events.csv` | One row per event: `pass`, `interception`, `turnover`, `shot`, `made_shot`, `offensive_rebound`, `defensive_rebound`, with time, player, team, target, and for shots the location, distance and points |
-| `touches.parquet`, `touches.csv` | **The main table.** One row per touch: player, how the touch started (catch, steal, rebound), the action (pass, shot, turnover) with outcome and target, dribbles, the handler's position, speed and nearest defender, every other player's id, position and speed at that moment, and a confidence score |
+| `touches.parquet`, `touches.csv` | **The main table.** One row per touch: player, how the touch started (catch, steal, rebound), the action (pass, shot, turnover) with outcome and target, dribbles, the handler's position, speed and nearest defender, every other player's id, position and speed at that moment, a confidence score, and `id_confidence` (how sure the player id is one person) |
 | `tracking.csv` | Every player and the ball, every frame, in court metres (ball includes height), with speed and running distance |
 | `box_score.csv` | Per player: touches, time of possession, passes, interceptions, turnovers, FGA/FGM, 3PA/3PM |
 | `scene.json` | Per-frame 3D scene for any front-end (three.js, Unity, Blender) |
@@ -69,7 +69,8 @@ courtvision/
   config.py                 typed config, YAML overrides (configs/default.yaml)
   types.py                  shared data structures
   io/                       streaming video I/O, stage caching
-  detection/tracker.py      YOLO + ByteTrack: players, refs, ball candidates, hoop
+  detection/tracker.py      YOLO: players, refs, ball candidates, hoop
+  detection/tracking.py     ByteTrack in camera-stabilised coordinates, reset at cuts
   teams/team_assigner.py    jersey-colour (default) or CLIP team assignment
   ball/interpolation.py     ball selection, outliers, interpolation
   possession/acquisition.py per-frame holder with hysteresis, possession segments
@@ -80,7 +81,7 @@ courtvision/
   court/keypoints.py        YOLO pose court keypoint detector
   court/homography.py       robust homography, tracking through pans, camera recovery
   court/camera_motion.py    frame-to-frame camera motion (optical flow), cut detection
-  detection/stitch.py       re-link player tracks split by the tracker
+  detection/stitch.py       re-link split tracks; at most 5 identities per team
   diagnostics.py            per-stage health report (which stage is weak)
   tactical/                 image-to-court projection, top-down court rendering
   metrics/speed_distance.py smoothed speed and distance

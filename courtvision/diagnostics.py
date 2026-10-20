@@ -113,7 +113,8 @@ def diagnose(raw_players: PlayerTracks, ball_candidates: list[list[dict]], resul
         "p90_fit_error_m": float(np.nanpercentile(fit_err, 90)) if np.isfinite(fit_err).any() else None,
         "rejected_fit_share": float(rejected.mean()) if n else 0.0,
         "fit_failures": {k: int(v) for k, v in Counter(fail[~kp_fit]).items() if k and k != "ok"},
-        "camera_cuts": cuts,
+        "camera_cuts": len(result.shot_cuts) if has_motion else None,
+        "motion_failures": cuts,  # frames whose camera motion could not be estimated (cuts included)
         "longest_unmapped_s": round(max(unmapped_runs, default=0) / fps, 2),
     }
     if court_block["mapped_share"] < 0.9:
@@ -169,12 +170,24 @@ def diagnose(raw_players: PlayerTracks, ball_candidates: list[list[dict]], resul
         findings.append((2, "court mapping / detection",
                          f"Players jump more than 1 m between frames {players_block['teleports_per_100_steps']} times per "
                          "100 steps (before smoothing). Causes: court mapping jumps, or boxes cut off by other players."))
+    ids_per_team = Counter(result.team_of.get(t, -1) for t in {t for ft in result.players for t in ft})
+    weak = [k for k, v in result.identity_conf.items() if v < 0.5]
+    players_block.update({
+        "identities_per_team": {str(k): v for k, v in sorted(ids_per_team.items())},
+        "extra_tracks": len(result.identity_extras),
+        "weak_identities": len(weak),
+    })
     if players_block["short_tracks_share"] > 0.3:
         findings.append((2, "player tracking",
                          f"{players_block['short_tracks_share']:.0%} of player tracks last under a second "
-                         f"({players_block['tracks_raw']} tracks for at most 10 players; {len(remap)} re-linked). "
-                         "IDs switch often, so bodies pop in and out. Better detector recall and a re-ID tracker "
-                         "(BoT-SORT with appearance) are the fixes."))
+                         f"({players_block['tracks_raw']} tracks, {sum(ids_per_team.values())} identities after "
+                         f"re-joining). The tracker loses players often, so bodies pop in and out; most of it is "
+                         "missed detections (detector recall on broadcast frames)."))
+    if len(weak) > max(2, 0.3 * len(result.identity_conf)):
+        findings.append((2, "player identity",
+                         f"{len(weak)} of {len(result.identity_conf)} player identities were re-joined on a close call "
+                         "between teammates (court position alone can't tell them apart), so touches may be credited "
+                         "to the wrong teammate. Reading jersey numbers is the fix."))
     if players_block["frames_over_10_players_share"] > 0.05:
         findings.append((2, "player detection",
                          f"More than 10 players are detected in {players_block['frames_over_10_players_share']:.0%} of "
@@ -253,6 +266,7 @@ def format_report(summary: dict) -> str:
         f"fit error {err}, {pct(c['rejected_fit_share'])} fits rejected, longest gap {c['longest_unmapped_s']} s"
         + (f", {c['camera_cuts']} cuts" if c["camera_cuts"] is not None else ""),
         f"Players         {p['tracks_raw']} tracks ({p['relinked']} re-linked), {pct(p['short_tracks_share'])} under 1 s, "
+        f"identities per team {p.get('identities_per_team', {})}, {p.get('weak_identities', 0)} weak, "
         f"{p['players_per_frame_mean']} per frame (max {p['players_per_frame_max']}), "
         f"{pct(p['off_court_feet_share'])} feet off court, {p['teleports_per_100_steps']} jumps per 100 steps",
         f"Teams           tracks per team {t['tracks_per_team']}"
