@@ -35,8 +35,10 @@ What CourtVision does beyond it:
 1. `notebooks/01_train_detector.ipynb` trains the player / ball / hoop detector.
 2. `notebooks/02_train_court_keypoints.ipynb` trains the court keypoint model.
 3. `notebooks/00_end_to_end_colab.ipynb` runs everything on a video and shows the tables, 3D play and annotated video.
+4. `notebooks/03_collect_frames_to_label.ipynb` picks the frames of your own clips the models get wrong and
+   exports them with pre-labels for Roboflow. Correct them, then retrain with 01 and 02, which merge them in.
 
-All three save to `MyDrive/courtvision/`, so weights and runs survive Colab disconnects.
+All four save to `MyDrive/courtvision/`, so weights and runs survive Colab disconnects.
 Put your Roboflow key in Colab **Secrets** as `ROBOFLOW_API_KEY`.
 
 ## Quick start (local)
@@ -87,9 +89,10 @@ courtvision/
   pose/                     2D body keypoints per track, lifted to 3D skeletons with the camera
   recon3d/                  3D ball from physics, scene export (JSON), three.js body viewer, Plotly
   viz/annotate.py           video overlays
+  training/                 dataset merge and re-split, zoomed court crops, hard-frame mining
   pipeline.py               orchestration
   cli.py                    `courtvision run ...`
-notebooks/                  Colab: end-to-end, detector training, keypoint training
+notebooks/                  Colab: end-to-end, detector training, keypoint training, frame collection
 tests/                      unit tests and synthetic end-to-end test
 docs/architecture.md        how each stage works and its known limits
 ```
