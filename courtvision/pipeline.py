@@ -2,16 +2,19 @@
 
 Stages (each cached to ``output.cache_dir`` so re-runs only redo what changed):
 
-    1. detect + track          players, referees, ball candidates, hoop
-    2. court keypoints         -> per-frame homography, carried through pans by camera motion
-                                  (optical flow) -> per-frame camera
-    3. ball cleaning           select, de-outlier, interpolate
-    4. team assignment         one team per track
-    5. possession              per-frame holder with hysteresis
-    6. events                  passes, interceptions, turnovers, shots, rebounds
-    7. court projection        metres (tracks re-linked, positions smoothed), speed and distance
-    8. 3D                      ball height from physics, player skeletons (optional), scene export
-    9. outputs                 touches (CSV + Parquet, the main table), events, tracking,
+    1. detect                  players, referees, ball candidates, hoop (the cached model pass)
+    2. camera motion + track   optical-flow camera motion and shot cuts; players and referees
+                               tracked in camera-stabilised coordinates, reset at cuts
+    3. court keypoints         -> per-frame homography, carried through pans by camera motion
+                                  -> per-frame camera
+    4. ball cleaning           select, de-outlier, interpolate
+    5. team assignment         one team per track
+    6. possession              per-frame holder with hysteresis
+    7. events                  passes, interceptions, turnovers, shots, rebounds
+    8. court projection        metres (tracks re-linked, at most 5 identities per team, positions
+                               smoothed), speed and distance
+    9. 3D                      ball height from physics, player skeletons (optional), scene export
+   10. outputs                 touches (CSV + Parquet, the main table), events, tracking,
                                box score, JSON scene, 3D HTML, annotated video, diagnostics
 
 Frames are streamed, never all held in memory, so a full game works on Colab.
@@ -26,8 +29,8 @@ import numpy as np
 from .ball.interpolation import clean_ball_track
 from .config import Config
 from .court.geometry import get_court
-from .court.homography import estimate_homographies, fit_homography_info, track_homographies
-from .detection.stitch import apply_remap, stitch_tracks
+from .court.homography import confirm_cuts, estimate_homographies, fit_homography_info, track_homographies
+from .detection.stitch import apply_remap, assign_identities, stitch_tracks
 from .diagnostics import diagnose, format_report, plot_diagnostics
 from .events.passes import detect_passes
 from .events.shots import detect_shots
@@ -42,7 +45,7 @@ from .recon3d.viewer import scene_to_threejs
 from .metrics.speed_distance import speed_and_distance
 from .tactical.projector import project_tracks, smooth_court_positions
 from .teams.team_assigner import TeamAssigner
-from .types import PipelineResult
+from .types import DetectionResult, PipelineResult, RawDetections
 
 log = logging.getLogger(__name__)
 
@@ -56,34 +59,41 @@ class Pipeline:
         self.player_info: dict[int, dict] = {}
 
     # ------------------------------------------------------------------ stages
-    def detect(self, video: Path, fps: float, total: int):
-        from .detection.tracker import ObjectTracker
+    def detect(self, video: Path, total: int):
+        from .detection.tracker import ObjectDetector
         c = self.cfg
-        tracker = ObjectTracker(c.models.detector, c.detection, c.models.device, c.models.ball_detector, fps)
-        return tracker.run(iter_frames(video), total=total)
+        detector = ObjectDetector(c.models.detector, c.detection, c.models.device, c.models.ball_detector)
+        return detector.run(iter_frames(video), total=total)
+
+    def track(self, raw: RawDetections, motion, cuts: set[int], fps: float) -> DetectionResult:
+        from .detection.tracking import track_people
+        t = self.cfg.tracking
+        players, referees = track_people(raw.people, motion, cuts, fps, self.cfg.detection.track_buffer,
+                                         t.camera_compensation, t.reset_on_cut)
+        return DetectionResult(players=players, referees=referees, ball_candidates=raw.ball_candidates,
+                               hoops=raw.hoops)
 
     def court_keypoints(self, video: Path, total: int):
         from .court.keypoints import CourtKeypointDetector
         det = CourtKeypointDetector(self.cfg.models.court_keypoints, self.cfg.models.device)
         return det.run(iter_frames(video), total=total)
 
-    def camera_motion(self, video: Path, det, total: int):
+    def camera_motion(self, video: Path, boxes: list[list[list[float]]], total: int):
+        """(motion, cuts): frame-to-frame camera homographies and the frames that start a new shot."""
         from .court.camera_motion import CameraMotionEstimator
-        boxes = [[p["bbox"] for p in (*pl.values(), *rf.values())] for pl, rf in zip(det.players, det.referees)]
-        return CameraMotionEstimator().run(iter_frames(video), boxes, total=total)[0]
+        est = CameraMotionEstimator()
+        motion = est.run(iter_frames(video), boxes, total=total)[0]
+        return motion, set(est.cuts)
 
-    def homographies(self, video: Path, det, total: int):
+    def homographies(self, video: Path, n: int, motion, total: int):
         """Per-frame image->court homographies and calibration info (both empty-ish without a model)."""
         c = self.cfg
-        n = len(det.players)
         if not (c.models.court_keypoints and Path(c.models.court_keypoints).exists()):
             log.warning("No court keypoint model; skipping court-space outputs (tactical view, speed, 3D).")
             return [None] * n, []
         kps = cached(c.output.cache_dir, cache_key(video, "keypoints", c.models.court_keypoints),
                      lambda: self.court_keypoints(video, total))
-        if c.court.camera_motion:
-            motion = cached(c.output.cache_dir, cache_key(video, "motion", c.models.detector, c.detection, "v1"),
-                            lambda: self.camera_motion(video, det, total))
+        if c.court.camera_motion and motion is not None:
             return track_homographies(kps, motion, self.court, c.court.keypoint_conf, c.court.max_flow_frames,
                                       c.court.homography_smoothing, c.court.reject_threshold_m)
         Hs = estimate_homographies(kps, self.court, c.court.keypoint_conf,
@@ -111,11 +121,22 @@ class Pipeline:
         fps, total, size = video_info(video)
         cache = c.output.cache_dir
 
-        det = cached(cache, cache_key(video, "detect", c.models.detector, c.models.ball_detector, c.detection),
-                     lambda: self.detect(video, fps, total))
-        n = len(det.players)
-
-        homographies, calibration = self.homographies(video, det, total)
+        raw = cached(cache, cache_key(video, "detect", c.models.detector, c.models.ball_detector, c.detection, "v2"),
+                     lambda: self.detect(video, total))
+        pretracked = isinstance(raw, DetectionResult)  # a stub that already carries track ids
+        has_kp_model = bool(c.models.court_keypoints and Path(c.models.court_keypoints).exists())
+        motion, cuts = None, set()
+        if (c.court.camera_motion and has_kp_model) or (c.tracking.camera_compensation and not pretracked):
+            boxes = ([[p["bbox"] for p in (*pl.values(), *rf.values())] for pl, rf in zip(raw.players, raw.referees)]
+                     if pretracked else [[p["bbox"] for p in ppl] for ppl in raw.people])
+            motion, cuts = cached(cache, cache_key(video, "motion", c.models.detector, c.detection, "v2"),
+                                  lambda: self.camera_motion(video, boxes, total))
+        n = len(raw.players) if pretracked else len(raw.people)
+        homographies, calibration = self.homographies(video, n, motion, total)
+        # A histogram jump is only a cut if the court view changes too; a flash or a graphic
+        # wiping over the picture must not reset every track.
+        cuts = confirm_cuts(cuts, homographies, size)
+        det = raw if pretracked else self.track(raw, motion, cuts, fps)
 
         assigner = TeamAssigner(c.teams)
         needed = sorted({f for fs in assigner.sample_frames(det.players).values() for f in fs})
@@ -125,10 +146,12 @@ class Pipeline:
         poses2d = None
         if c.pose.enabled:
             poses2d = cached(cache, cache_key(video, "pose", c.pose.model, c.pose.imgsz, c.pose.conf,
-                                              c.pose.match_iou, c.models.detector, c.detection),
+                                              c.pose.match_iou, c.models.detector, c.detection,
+                                              "tracks-v2", c.tracking.camera_compensation,
+                                              c.tracking.reset_on_cut, sorted(cuts)),
                              lambda: self.estimate_poses(video, det.players, total))
 
-        result = self.analyze(det, homographies, team_of, fps, size, poses2d, calibration)
+        result = self.analyze(det, homographies, team_of, fps, size, poses2d, calibration, sorted(cuts))
         if c.output.write_diagnostics:
             result.diagnostics, result.diagnostics_frames = diagnose(
                 det.players, det.ball_candidates, result, calibration, self.court,
@@ -141,19 +164,34 @@ class Pipeline:
         return result
 
     def analyze(self, det, homographies, team_of: dict[int, int], fps: float,
-                size: tuple[int, int], poses2d=None, calibration: list[dict] | None = None) -> PipelineResult:
+                size: tuple[int, int], poses2d=None, calibration: list[dict] | None = None,
+                shot_cuts: list[int] | None = None) -> PipelineResult:
         """Everything after the models: pure geometry and logic, unit-testable without a GPU."""
         c = self.cfg
-        players, remap = det.players, {}
+        t = c.tracking
+        players, remap, id_conf, extras = det.players, {}, {}, set()
         court_pos = project_tracks(players, homographies, self.court)
-        if c.tracking.relink and court_pos:
-            remap = stitch_tracks(players, court_pos, team_of, fps, c.tracking.relink_max_gap_s,
-                                  c.tracking.relink_max_speed_mps)
-            if remap:
-                players = apply_remap(players, remap)
-                team_of = {t: v for t, v in team_of.items() if t not in remap}
-                poses2d = apply_remap(poses2d, remap) if poses2d else poses2d
-                court_pos = project_tracks(players, homographies, self.court)
+
+        def rejoin(step: dict[int, int]):
+            nonlocal players, team_of, poses2d, court_pos
+            players = apply_remap(players, step)
+            team_of = {k: v for k, v in team_of.items() if k not in step}
+            poses2d = apply_remap(poses2d, step) if poses2d else poses2d
+            court_pos = project_tracks(players, homographies, self.court)
+            for k, v in step.items():  # compose with earlier steps, so remap maps raw ids to final ids
+                remap[k] = v
+            for k, v in remap.items():
+                remap[k] = step.get(v, v)
+
+        if t.relink and court_pos:
+            step = stitch_tracks(players, court_pos, team_of, fps, t.relink_max_gap_s, t.relink_max_speed_mps)
+            if step:
+                rejoin(step)
+        if t.identities and court_pos:
+            step, id_conf, extras = assign_identities(players, court_pos, team_of, fps, t.max_per_team,
+                                                      t.identity_max_gap_s, t.identity_max_speed_mps)
+            if step:
+                rejoin(step)
         if c.tracking.smooth:
             court_pos = smooth_court_positions(court_pos, fps, c.tracking.max_fill_s, c.tracking.smooth_window_s)
 
@@ -176,7 +214,8 @@ class Pipeline:
                               hoops=det.hoops, team_of=team_of, possessor=possessor, possessions=segments,
                               events=events, homographies=homographies, court_positions=court_pos,
                               speed_kmh=speed, distance_m=dist, ball_3d=ball_3d,
-                              pose_3d=pose_3d, calibration=calibration or [], track_remap=remap)
+                              pose_3d=pose_3d, calibration=calibration or [], track_remap=remap,
+                              identity_conf=id_conf, identity_extras=sorted(extras), shot_cuts=shot_cuts or [])
 
     # ----------------------------------------------------------------- outputs
     def write_outputs(self, result: PipelineResult, video: Path, out_dir: Path) -> None:

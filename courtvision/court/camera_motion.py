@@ -50,7 +50,10 @@ class CameraMotionEstimator:
 
         ``motion[t]`` maps pixel coordinates of frame t-1 to frame t (full resolution), or is None
         for the first frame and at cuts. ``boxes[t]`` lists the moving-object boxes in frame t.
+        Afterwards ``self.cuts`` lists the frames that start a new shot (a histogram jump), as
+        opposed to frames where the motion fit merely failed.
         """
+        self.cuts: list[int] = []
         motion: list[Optional[np.ndarray]] = []
         ratios: list[float] = []
         prev = prev_hist = None
@@ -65,7 +68,9 @@ class CameraMotionEstimator:
             cv2.normalize(hist, hist)
             M, ratio = None, 0.0
             if prev is not None:
-                if cv2.compareHist(prev_hist, hist, cv2.HISTCMP_CORREL) >= self.cut_hist_corr:
+                if cv2.compareHist(prev_hist, hist, cv2.HISTCMP_CORREL) < self.cut_hist_corr:
+                    self.cuts.append(t)
+                else:
                     mask = self._mask(prev.shape, boxes[t - 1] if boxes else [], s, static_hits, static_obs)
                     M, ratio = self._step(prev, gray, mask, static_hits, static_obs)
                 if M is not None:

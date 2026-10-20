@@ -70,9 +70,15 @@ class CourtConfig:
 
 @dataclass
 class TrackingConfig:
+    camera_compensation: bool = True    # track in camera-stabilised coordinates, so pans don't break tracks
+    reset_on_cut: bool = True           # new track ids after a camera cut (identities re-joined in court space)
     relink: bool = True                 # join player tracks the tracker split in two
     relink_max_gap_s: float = 1.0
     relink_max_speed_mps: float = 6.0
+    identities: bool = True             # at most max_per_team ids per team: re-join players who left the frame
+    max_per_team: int = 5
+    identity_max_gap_s: float = 10.0
+    identity_max_speed_mps: float = 8.0
     smooth: bool = True                 # de-spike, gap-fill and smooth court positions
     max_fill_s: float = 0.5
     smooth_window_s: float = 0.3
