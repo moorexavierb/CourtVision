@@ -192,6 +192,29 @@ def track_homographies(keypoints: list[np.ndarray], motion: list[Optional[np.nda
     return out, info
 
 
+def confirm_cuts(cuts: set[int], homographies: list[Optional[np.ndarray]], image_size: tuple[int, int],
+                 jump_m: float = 2.0) -> set[int]:
+    """Keep the histogram cuts where the court mapping also jumps (or is lost).
+
+    Flashes, replay wipes and graphics can swing the brightness histogram without the camera
+    changing view. A real cut shows the court from somewhere else, so the same pixels land more
+    than ``jump_m`` apart on the court before and after it. With no court mapping at all, every
+    histogram cut is kept.
+    """
+    if not any(H is not None for H in homographies):
+        return set(cuts)
+    w, h = image_size
+    gx, gy = np.meshgrid(np.linspace(0.1, 0.9, 5) * w, np.linspace(0.5, 0.95, 4) * h)
+    pts = np.stack([gx.ravel(), gy.ravel()], 1)
+    out = set()
+    for t in cuts:
+        a = homographies[t - 1] if 0 < t <= len(homographies) else None
+        b = homographies[t] if t < len(homographies) else None
+        if a is None or b is None or np.median(np.linalg.norm(apply_h(a, pts) - apply_h(b, pts), axis=1)) > jump_m:
+            out.add(t)
+    return out
+
+
 def camera_from_homography(H_img_to_court: np.ndarray, image_size: tuple[int, int],
                            focal: float | None = None) -> dict:
     """Recover K and a 3x4 projection P (court metres -> pixels) from a floor homography.

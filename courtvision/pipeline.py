@@ -29,7 +29,7 @@ import numpy as np
 from .ball.interpolation import clean_ball_track
 from .config import Config
 from .court.geometry import get_court
-from .court.homography import estimate_homographies, fit_homography_info, track_homographies
+from .court.homography import confirm_cuts, estimate_homographies, fit_homography_info, track_homographies
 from .detection.stitch import apply_remap, assign_identities, stitch_tracks
 from .diagnostics import diagnose, format_report, plot_diagnostics
 from .events.passes import detect_passes
@@ -131,10 +131,12 @@ class Pipeline:
                      if pretracked else [[p["bbox"] for p in ppl] for ppl in raw.people])
             motion, cuts = cached(cache, cache_key(video, "motion", c.models.detector, c.detection, "v2"),
                                   lambda: self.camera_motion(video, boxes, total))
-        det = raw if pretracked else self.track(raw, motion, cuts, fps)
-        n = len(det.players)
-
+        n = len(raw.players) if pretracked else len(raw.people)
         homographies, calibration = self.homographies(video, n, motion, total)
+        # A histogram jump is only a cut if the court view changes too; a flash or a graphic
+        # wiping over the picture must not reset every track.
+        cuts = confirm_cuts(cuts, homographies, size)
+        det = raw if pretracked else self.track(raw, motion, cuts, fps)
 
         assigner = TeamAssigner(c.teams)
         needed = sorted({f for fs in assigner.sample_frames(det.players).values() for f in fs})
@@ -144,7 +146,9 @@ class Pipeline:
         poses2d = None
         if c.pose.enabled:
             poses2d = cached(cache, cache_key(video, "pose", c.pose.model, c.pose.imgsz, c.pose.conf,
-                                              c.pose.match_iou, c.models.detector, c.detection),
+                                              c.pose.match_iou, c.models.detector, c.detection,
+                                              "tracks-v2", c.tracking.camera_compensation,
+                                              c.tracking.reset_on_cut, sorted(cuts)),
                              lambda: self.estimate_poses(video, det.players, total))
 
         result = self.analyze(det, homographies, team_of, fps, size, poses2d, calibration, sorted(cuts))

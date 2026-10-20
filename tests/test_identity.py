@@ -134,3 +134,13 @@ def test_pipeline_tracks_raw_detections(tmp_path, monkeypatch):
     monkeypatch.setattr(pipe, "camera_motion", lambda *a: (motion, set()))
     result = pipe.run(video)
     assert len(ids(result.players)) == 3
+
+
+def test_flash_is_not_a_cut():
+    from courtvision.court.homography import confirm_cuts
+    H = np.diag([0.01, 0.01, 1.0])
+    other = H @ shift(-800)  # a different view: the same pixels land 8 m away on the court
+    Hs = [H] * 10 + [other] * 10
+    # Histogram jumps at 4 (a flash; the court view is unchanged) and at 10 (a real cut).
+    assert confirm_cuts({4, 10}, Hs, (1920, 1080)) == {10}
+    assert confirm_cuts({4, 10}, [None] * 20, (1920, 1080)) == {4, 10}
