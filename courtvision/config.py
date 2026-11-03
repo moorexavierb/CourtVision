@@ -1,4 +1,4 @@
-"""Typed configuration loaded from YAML with dataclass defaults."""
+"""All settings in one place. Defaults live here; configs/default.yaml overrides them."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields, is_dataclass
@@ -9,132 +9,75 @@ import yaml
 
 
 @dataclass
-class ModelsConfig:
-    detector: str = "models/player_detector.pt"
-    ball_detector: str | None = None
-    court_keypoints: str | None = "models/court_keypoints.pt"
-    device: str | None = None
+class Models:
+    detector: str = "models/player_detector.pt"        # YOLO detect: Player, Ref, Ball, Hoop
+    court_keypoints: str = "models/court_keypoints.pt"  # YOLO pose: 18 court landmarks (court.py)
+    device: str | None = None                           # None = cuda if available
 
 
 @dataclass
-class DetectionConfig:
-    imgsz: int = 1280
-    conf: float = 0.10
-    ball_conf: float = 0.05
+class Detection:
+    imgsz: int = 1280            # broadcast balls are 15-30 px at 1280; smaller loses them
+    conf: float = 0.25           # players and referees
+    ball_conf: float = 0.10      # the ball is small and blurred, so it gets a lower bar
     batch_size: int = 16
-    track_buffer: int = 60  # frames a lost player track is kept alive (occlusions in the paint)
+    # Model class names for each role, so a model with other names only needs a config change.
     class_names: dict[str, list[str]] = field(default_factory=lambda: {
-        "player": ["Player"],
-        "referee": ["Ref"],
-        "ball": ["Ball"],
-        "hoop": ["Hoop"],
-    })
+        "player": ["Player"], "referee": ["Ref", "Referee"], "ball": ["Ball"], "hoop": ["Hoop"]})
 
 
 @dataclass
-class TeamsConfig:
-    method: str = "color"
-    team_names: list[str] = field(default_factory=lambda: ["Team A", "Team B"])
-    clip_prompts: list[str] | None = None
-    samples_per_track: int = 12
+class Court:
+    standard: str = "nba"            # nba | fiba
+    keypoint_conf: float = 0.5       # keypoints below this are ignored
+    keypoint_imgsz: int = 640
+    max_flow_frames: int = 150       # longest stretch the mapping is carried on camera motion alone
+    smoothing: float = 0.5           # weight on the camera-tracked mapping when a keypoint fit agrees
+    reject_m: float = 1.5            # keypoint fits this far from the tracked mapping are rejected
 
 
 @dataclass
-class BallConfig:
-    max_speed_px_per_frame: float = 90.0
-    max_gap_frames: int = 20
+class Tracking:
+    track_buffer: int = 60           # frames a lost track survives (screens in the paint)
+    relink_max_gap_s: float = 1.0    # join a track that ends to one that starts this soon after
+    relink_max_speed_mps: float = 7.0
+    smooth_window_s: float = 0.3     # moving average on court positions
+    max_fill_s: float = 0.5          # gaps up to this long inside a track are interpolated
 
 
 @dataclass
-class PossessionConfig:
-    max_distance_ratio: float = 0.35
-    min_frames: int = 5
+class Ball:
+    max_speed_px: float = 90.0       # per frame; faster jumps are false detections
+    max_gap_frames: int = 20         # image-space gaps up to this are interpolated
+    hold_distance: float = 0.35      # ball-to-hand distance, as a fraction of the player's box height
+    max_rel_speed: float = 1.5       # a held ball moves with the player: under this many box heights/s
+    max_flight_s: float = 3.0        # longest free-ball stretch drawn as a straight ground line
 
 
 @dataclass
-class EventsConfig:
-    interception_max_gap_frames: int = 45
-    shot_window_frames: int = 45
-
-
-@dataclass
-class CourtConfig:
-    standard: str = "nba"
-    keypoint_conf: float = 0.5
-    homography_hold_frames: int = 15
-    homography_smoothing: float = 0.6   # weight on the camera-tracked mapping when a keypoint fit agrees
-    camera_motion: bool = True          # follow pans/zooms with optical flow between keypoint fits
-    max_flow_frames: int = 150          # longest stretch carried on camera motion alone
-    reject_threshold_m: float = 1.5     # keypoint fits further than this from the tracked mapping are dropped
-
-
-@dataclass
-class TrackingConfig:
-    relink: bool = True                 # join player tracks the tracker split in two
-    relink_max_gap_s: float = 1.0
-    relink_max_speed_mps: float = 6.0
-    smooth: bool = True                 # de-spike, gap-fill and smooth court positions
-    max_fill_s: float = 0.5
-    smooth_window_s: float = 0.3
-
-
-@dataclass
-class MetricsConfig:
-    speed_window_frames: int = 5
-    max_speed_mps: float = 11.0
-
-
-@dataclass
-class PoseConfig:
-    enabled: bool = False          # adds a GPU pass; ~10 ms per player-frame to lift, so best on clips
-    model: str = "yolo11m-pose.pt"  # any ultralytics COCO-17 pose model; downloaded on first use
-    imgsz: int = 1280
-    conf: float = 0.25
-    batch_size: int = 16
-    match_iou: float = 0.4         # pose box to player track box overlap needed to attach a pose
-    min_keypoint_conf: float = 0.3
-    player_height_m: float = 2.0   # bone-length prior; NBA average is about 1.98 m
-    smooth_window: int = 5
-
-
-@dataclass
-class OutputConfig:
-    # 2d: court x, y for every player and the ball (tracking_2d.csv), no 3D work.
-    # 3d: also the camera, ball height, scene.json and the 3D viewer (the earlier pipeline).
-    mode: str = "2d"
-    # tracking_2d is resampled to this rate (None keeps the video's frames). Detection, tracking and
-    # possession still run on every video frame: the ball moves ~1 m per frame on a pass at 30 fps,
-    # and ByteTrack loses players in the paint if it only sees every third frame.
-    tracking_fps: float | None = 10.0
+class Output:
     dir: str = "output"
-    cache_dir: str | None = "stubs"
-    write_video: bool = True
-    write_3d_html: bool = True         # only in mode 3d
-    viewer: str = "bodies"              # bodies (three.js animated players) | plotly (dots)
-    character_glb: str | None = None    # rigged Mixamo-style .glb used for every player in the bodies viewer
-    write_diagnostics: bool = True      # diagnostics.json / _frames.csv / .png: which stage is weak
+    cache_dir: str | None = "stubs"  # model passes are cached here per video; None disables
+    hz: float = 10.0                 # samples per second in tracking.parquet
+    team_names: list[str] = field(default_factory=lambda: ["Team A", "Team B"])
+    write_video: bool = True         # annotated video with a top-down minimap, for checking by eye
 
 
 @dataclass
 class Config:
-    models: ModelsConfig = field(default_factory=ModelsConfig)
-    detection: DetectionConfig = field(default_factory=DetectionConfig)
-    teams: TeamsConfig = field(default_factory=TeamsConfig)
-    ball: BallConfig = field(default_factory=BallConfig)
-    possession: PossessionConfig = field(default_factory=PossessionConfig)
-    events: EventsConfig = field(default_factory=EventsConfig)
-    court: CourtConfig = field(default_factory=CourtConfig)
-    tracking: TrackingConfig = field(default_factory=TrackingConfig)
-    metrics: MetricsConfig = field(default_factory=MetricsConfig)
-    pose: PoseConfig = field(default_factory=PoseConfig)
-    output: OutputConfig = field(default_factory=OutputConfig)
+    models: Models = field(default_factory=Models)
+    detection: Detection = field(default_factory=Detection)
+    court: Court = field(default_factory=Court)
+    tracking: Tracking = field(default_factory=Tracking)
+    ball: Ball = field(default_factory=Ball)
+    output: Output = field(default_factory=Output)
 
     @classmethod
     def load(cls, path: str | Path | None = None, **overrides: Any) -> "Config":
+        """Defaults, then the YAML file, then keyword overrides (e.g. output={"hz": 25})."""
         cfg = cls()
         if path is not None:
-            with open(path) as f:
-                _merge(cfg, yaml.safe_load(f) or {})
+            _merge(cfg, yaml.safe_load(open(path)) or {})
         _merge(cfg, overrides)
         return cfg
 

@@ -1,16 +1,20 @@
-"""Scores that match what the 2D pipeline needs, per dataset.
+"""Scores that match what the tracking dataset needs, per source dataset.
 
-mAP rewards a good ranking of boxes over a whole dataset. The pipeline instead
-runs at one confidence threshold and needs, in every frame, all ten players and
-the one ball. So besides Ultralytics' mAP, models are scored on:
+mAP rewards a good ranking of boxes over a whole dataset. The pipeline instead runs at one
+confidence threshold and needs, in every frame, all ten players, the ball, and enough court
+landmarks to map the frame. So besides Ultralytics' mAP, models are scored on:
 
-* **per-frame player recall**: players found / players labelled, averaged over
-  frames, and the share of frames where every labelled player was found (the
-  "6 of 10 players" number from the real clip);
-* **ball precision and recall** at the pipeline's ball threshold, plus the share
-  of frames with a phantom ball (each one is a false possession change);
-* **tracking** (on sequences with track ids, e.g. SportsMOT val): MOTA and IDF1,
-  because a court position is only useful if it stays attached to one player.
+* detector: per-frame player recall (players found / players labelled, averaged over frames) and
+  the share of frames where every labelled player was found; ball precision and recall; the share
+  of frames with a phantom ball;
+* tracking (sequences with track ids, e.g. SportsMOT val): MOTA and IDF1, because a court
+  position is only useful if it stays attached to one player;
+* court model: share of frames that get a usable homography, landmarks per frame, and, where
+  labels exist, landmark error in pixels and PCK (share within 2% of the image width).
+
+Only classes a source labels itself are scored on it (``classes``): SportsMOT's ball labels are
+the old detector's guesses, and scoring a new model against them would measure agreement with
+the old model, not accuracy.
 """
 from __future__ import annotations
 
@@ -108,7 +112,8 @@ def summarise(frames: list[dict], expected_players: Optional[int] = None) -> dic
 
 def score_images(model, images: Iterable[str], class_names: list[str], conf: dict[str, float],
                  imgsz: int = 1280, iou_thr: float = 0.5, batch: int = 16) -> list[dict]:
-    """Run an Ultralytics model over YOLO-labelled images and score every frame (needs a GPU stack)."""
+    """Run an Ultralytics model over YOLO-labelled images and score every frame (needs a GPU stack).
+    conf: {class name: threshold} for the classes to score."""
     images = list(images)
     wanted = {n: class_names.index(n) for n in conf if n in class_names}
     model_ids = {v: k for k, v in model.names.items()}
@@ -183,3 +188,54 @@ def mot_table(per_sequence: dict[str, dict]) -> pd.DataFrame:
                    id_switches=int(df["id_switches"].sum()))
     df.loc["overall"] = overall
     return df
+
+
+# ----------------------------------------------------------------- court keypoints
+
+def court_scores(model, images: Iterable[str], court, imgsz: int = 640, kp_conf: float = 0.5,
+                 max_err_m: float = 0.5, orientation_sign: Optional[int] = None, batch: int = 16) -> dict:
+    """Court model on images: share mapped (its keypoints fit one homography within max_err_m,
+    the right way round when orientation_sign is given), landmarks per frame, and against labels
+    where they exist, median landmark error (px) and PCK@2% of width (a missed landmark counts
+    as wrong)."""
+    from ..court import fit_homography, orientation
+    from ..detect import best_court_instance
+    images = list(images)
+    mapped, n_kp, errs, pck = [], [], [], []
+    for i in range(0, len(images), batch):
+        for res in model.predict(images[i:i + batch], imgsz=imgsz, conf=0.25, verbose=False):
+            k = best_court_instance(res)
+            H, info = fit_homography(k, court, kp_conf, max_error_m=max_err_m)
+            if H is not None and orientation_sign is not None:
+                H = H if orientation(H, k[k[:, 2] >= kp_conf, :2]) == orientation_sign else None
+            mapped.append(H is not None)
+            n_kp.append(info["n_kp"])
+            lbl = label_path(res.path)
+            if lbl.exists() and lbl.read_text().split():
+                h, w = res.orig_shape
+                v = np.array(lbl.read_text().split()[5:], float).reshape(-1, 3)
+                vis = v[:, 2] > 0
+                if vis.any():
+                    d = np.linalg.norm(k[vis, :2] - v[vis, :2] * (w, h), axis=1)
+                    d[k[vis, 2] < kp_conf] = np.inf  # a landmark the model missed counts as wrong
+                    errs += d[np.isfinite(d)].tolist()
+                    pck += (d <= 0.02 * w).tolist()
+    return {"images": len(mapped), "mapped_share": round(float(np.mean(mapped)), 3) if mapped else None,
+            "keypoints_per_frame": round(float(np.mean(n_kp)), 2) if n_kp else None,
+            "median_px_error": round(float(np.median(errs)), 1) if errs else None,
+            "pck_2pct": round(float(np.mean(pck)), 3) if pck else None}
+
+
+# ----------------------------------------------------------------- new vs current
+
+def compare(new: dict, current: dict, higher=(), lower=(), tol: float = 0.01) -> tuple[bool, list[str]]:
+    """Is the new model at least as good? higher: metrics where more is better; lower: where less
+    is better. A metric missing (None) on either side is not compared. Returns (ok, reasons)."""
+    reasons = []
+    for key, sign in [(k, 1) for k in higher] + [(k, -1) for k in lower]:
+        a, b = new.get(key), current.get(key)
+        if a is None or b is None or a != a or b != b:  # missing or NaN
+            continue
+        if sign * (a - b) < -tol:
+            reasons.append(f"{key}: new {a} vs current {b}")
+    return not reasons, reasons

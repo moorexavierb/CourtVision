@@ -1,9 +1,7 @@
-"""Pick frames from your own broadcast clips that are worth labelling.
+"""Pick frames from your own NBA clips that are worth labelling (notebook 03).
 
-Validation mAP on the Roboflow data is already high (0.94 detector, 0.995
-court), yet on a real NBA clip only 5.9 of 10 players were found per frame and
-5.2 of 18 court keypoints. The fastest way to close that gap is to label the
-frames the current models get wrong. Each frame gets a score from the models'
+On a real NBA clip the models found 5.9 of 10 players and 5.2 of 18 court keypoints per frame.
+The fastest way to close that gap is to label the frames the current models get wrong. Each frame gets a score from the models'
 own outputs: missing players, no ball or several balls, low-confidence boxes,
 too few court keypoints (zoomed views), players overlapping each other (the
 crowded paint, where detections drop out and IDs swap) and motion blur. The
@@ -76,28 +74,3 @@ def sharpness(gray: np.ndarray) -> float:
     """Variance of the Laplacian of a grayscale frame (lower is blurrier)."""
     import cv2
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
-
-
-def yolo_rows(xyxy: np.ndarray, cls: np.ndarray, size: tuple[int, int]) -> list[str]:
-    """Boxes in pixels to YOLO "cls cx cy w h" rows, normalised by size (width, height)."""
-    W, H = size
-    rows = []
-    for (x0, y0, x1, y1), c in zip(np.asarray(xyxy, float), np.asarray(cls, int)):
-        rows.append(f"{c} {(x0 + x1) / 2 / W:.6f} {(y0 + y1) / 2 / H:.6f} {(x1 - x0) / W:.6f} {(y1 - y0) / H:.6f}")
-    return rows
-
-
-def pose_row(kpts_xy: np.ndarray, kpts_conf: np.ndarray, size: tuple[int, int], conf: float = 0.5) -> Optional[str]:
-    """One court keypoint prediction to a YOLO pose row; low-confidence points become invisible."""
-    W, H = size
-    vis = np.asarray(kpts_conf) >= conf
-    if not vis.any():
-        return None
-    pts = np.asarray(kpts_xy, float)
-    vx, vy = pts[vis, 0], pts[vis, 1]
-    x0, x1, y0, y1 = vx.min(), vx.max(), vy.min(), vy.max()
-    vals = []
-    for (x, y), v in zip(pts, vis):
-        vals += [x / W, y / H, 2] if v else [0, 0, 0]
-    box = [(x0 + x1) / 2 / W, (y0 + y1) / 2 / H, max(x1 - x0, 1) / W, max(y1 - y0, 1) / H]
-    return " ".join(["0"] + [f"{v:.6f}" for v in box] + [f"{v:.6g}" for v in vals])

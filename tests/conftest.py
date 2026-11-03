@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from courtvision.court.geometry import NBA
+from courtvision.court import NBA
 
 
 def look_at_camera(center, target, f=1400.0, size=(1920, 1080)):

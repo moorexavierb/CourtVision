@@ -1,13 +1,11 @@
-"""CourtVision: basketball video to tracking data, touch-by-touch events and 3D plays."""
+"""CourtVision: NBA broadcast video to 10 Hz court tracking of every player and the ball."""
 from .config import Config
 
-__all__ = ["Config", "Pipeline"]
-__version__ = "0.1.0"
+__all__ = ["Config", "run"]
+__version__ = "0.2.0"
 
 
-def __getattr__(name):
-    # Lazy so `import courtvision` does not pull in torch/ultralytics.
-    if name == "Pipeline":
-        from .pipeline import Pipeline
-        return Pipeline
-    raise AttributeError(name)
+def run(video, cfg=None, out_dir=None, write_outputs=True):
+    """Shortcut for courtvision.pipeline.run (imported lazily: no torch until it is needed)."""
+    from .pipeline import run as _run
+    return _run(video, cfg, out_dir, write_outputs)
