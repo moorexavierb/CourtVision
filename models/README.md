@@ -1,5 +1,4 @@
-Put trained weights here (they are git-ignored):
+Put trained weights here (they are git-ignored); in Colab they live in `MyDrive/courtvision/models/`:
 
-- `player_detector.pt` from `notebooks/01_train_detector.ipynb`
-- `ball_detector.pt` (optional) from the same notebook
-- `court_keypoints.pt` from `notebooks/02_train_court_keypoints.ipynb`
+- `player_detector.pt` (Player, Ref, Ball, Hoop) from `notebooks/01_train_detector.ipynb`
+- `court_keypoints.pt` (18 court landmarks) from `notebooks/02_train_court_keypoints.ipynb`

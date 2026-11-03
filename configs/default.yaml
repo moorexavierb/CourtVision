@@ -1,79 +1,47 @@
-# CourtVision default configuration. Every key is optional; anything omitted
-# falls back to the defaults in courtvision/config.py.
+# CourtVision settings. Every key is optional: anything left out takes the default in
+# courtvision/config.py, and an unknown key is an error (so a typo can't be silently ignored).
 
 models:
-  detector: models/player_detector.pt        # YOLO detect: Ball, Clock, Hoop, Overlay, Player, Ref, Scoreboard
-  ball_detector: null                        # optional dedicated ball model (higher recall on small balls)
-  court_keypoints: models/court_keypoints.pt # YOLO pose: 18 court keypoints
-  device: null                               # null = auto (cuda if available)
+  detector: models/player_detector.pt         # YOLO detect: Player, Ref, Ball, Hoop (notebook 01)
+  court_keypoints: models/court_keypoints.pt  # YOLO pose: 18 court landmarks (notebook 02)
+  device: null                                # null = cuda if available
 
 detection:
-  imgsz: 1280
-  conf: 0.10
-  ball_conf: 0.05
+  imgsz: 1280          # broadcast balls are 15-30 px at 1280; smaller loses them
+  conf: 0.25           # players, referees, hoops
+  ball_conf: 0.10      # the ball is small and blurred, so it gets a lower bar
   batch_size: 16
-  track_buffer: 60                           # frames a lost player track stays alive through occlusion
-  class_names:
+  class_names:         # model class names for each role
     player: [Player]
-    referee: [Ref]
+    referee: [Ref, Referee]
     ball: [Ball]
     hoop: [Hoop]
 
-teams:
-  method: color          # color | clip
-  team_names: [Team A, Team B]
-  clip_prompts: null     # e.g. ["white jersey", "dark blue jersey"] when method=clip
-  samples_per_track: 12
-
-ball:
-  max_speed_px_per_frame: 90
-  max_gap_frames: 20
-
-possession:
-  max_distance_ratio: 0.35   # ball-to-player distance as a fraction of player bbox height
-  min_frames: 5              # hysteresis before a possession change is accepted
-
-events:
-  interception_max_gap_frames: 45
-  shot_window_frames: 45
-
 court:
-  standard: nba          # nba | fiba
-  keypoint_conf: 0.5
-  homography_hold_frames: 15
-  homography_smoothing: 0.6   # weight on the camera-tracked mapping when a keypoint fit agrees
-  camera_motion: true         # follow pans and zooms with optical flow between keypoint fits
-  max_flow_frames: 150        # longest stretch carried on camera motion alone (5 s at 30 fps)
-  reject_threshold_m: 1.5     # keypoint fits this far from the tracked mapping are dropped
+  standard: nba        # nba | fiba
+  keypoint_conf: 0.5   # keypoints below this are ignored
+  keypoint_imgsz: 640
+  max_flow_frames: 150 # longest stretch the mapping is carried on camera motion alone (5 s at 30 fps)
+  smoothing: 0.5       # weight on the camera-tracked mapping when a keypoint fit agrees with it
+  reject_m: 1.5        # keypoint fits this far (metres) from the tracked mapping are rejected
 
 tracking:
-  relink: true                # join player tracks the tracker split in two (same team, reachable, no overlap)
-  relink_max_gap_s: 1.0
-  relink_max_speed_mps: 6.0
-  smooth: true                # remove spikes, fill short gaps, smooth court positions before 3D and metrics
-  max_fill_s: 0.5
-  smooth_window_s: 0.3
+  track_buffer: 60           # frames a lost track survives (screens in the paint)
+  relink_max_gap_s: 1.0      # join a track that ends to one that starts this soon after...
+  relink_max_speed_mps: 7.0  # ...if the player could have run between the two points
+  smooth_window_s: 0.3       # moving average on court positions
+  max_fill_s: 0.5            # gaps up to this long inside a track are interpolated
 
-metrics:
-  speed_window_frames: 5
-  max_speed_mps: 11.0
-
-pose:
-  enabled: false           # 2D body keypoints per player, lifted to 3D skeletons in scene.json
-  model: yolo11m-pose.pt   # any ultralytics COCO-17 pose model
-  imgsz: 1280
-  conf: 0.25
-  batch_size: 16
-  match_iou: 0.4
-  min_keypoint_conf: 0.3
-  player_height_m: 2.0
-  smooth_window: 5
+ball:
+  max_speed_px: 90       # per frame; faster jumps are false detections
+  max_gap_frames: 20     # image-space gaps up to this are interpolated
+  hold_distance: 0.35    # ball-to-hand distance, as a fraction of the player's box height
+  max_rel_speed: 1.5     # a held ball moves with the player: under this many box heights per second
+  max_flight_s: 3.0      # longest free-ball stretch drawn as a straight ground line
 
 output:
   dir: output
-  cache_dir: stubs
-  write_video: true
-  write_3d_html: true
-  viewer: bodies           # bodies (animated three.js players) | plotly (dots)
-  character_glb: null      # optional rigged Mixamo-style .glb used for every player
-  write_diagnostics: true  # diagnostics.json, diagnostics_frames.csv, diagnostics.png
+  cache_dir: stubs       # model passes are cached here per video; null disables
+  hz: 10                 # samples per second in tracking.parquet
+  team_names: [Team A, Team B]
+  write_video: true      # annotated video with a top-down minimap, for checking by eye

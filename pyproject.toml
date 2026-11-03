@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "courtvision"
-version = "0.1.0"
-description = "Basketball broadcast video to tracking data, touch-by-touch events and 3D play reconstructions."
+version = "0.2.0"
+description = "NBA broadcast video to a 10 Hz court tracking dataset of every on-court player and the ball."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -17,19 +17,17 @@ dependencies = [
     "scikit-learn>=1.3",
     "pyyaml>=6.0",
     "tqdm>=4.65",
-    "plotly>=5.18",
 ]
 
 [project.optional-dependencies]
-# Model inference / training. Kept optional so the pure-geometry and event
-# logic can be installed and unit-tested without a GPU stack.
+# Model inference and training. Optional so the geometry and tracking logic can be installed and
+# tested without a GPU stack.
 models = [
     "ultralytics>=8.3",
     "supervision>=0.25,<0.31",  # ByteTrack is removed from supervision in 0.31
     "torch>=2.2",
 ]
-clip = ["transformers>=4.40", "pillow>=10.0"]
-train = ["roboflow>=1.1"]
+train = ["roboflow>=1.1", "huggingface_hub>=0.20", "matplotlib>=3.7"]
 dev = ["pytest>=7.4"]
 
 [project.scripts]
@@ -37,9 +35,6 @@ courtvision = "courtvision.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["courtvision*"]
-
-[tool.setuptools.package-data]
-"courtvision.recon3d" = ["*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
