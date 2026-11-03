@@ -264,3 +264,32 @@ def summary(manifest: pd.DataFrame, names: list[str]) -> pd.DataFrame:
     """Images and boxes per class for each source and split."""
     agg = {"image": "count", **{n: "sum" for n in names}}
     return manifest.groupby(["source", "split"]).agg(agg).rename(columns={"image": "images"})
+
+
+def dhash(image_path: str, size: int = 8) -> int:
+    """64-bit difference hash: survives re-encoding and resizing, so it finds the same frame
+    re-exported by a Roboflow fork (where exact-byte dedupe misses it)."""
+    import cv2
+    img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return 0
+    small = cv2.resize(img, (size + 1, size), interpolation=cv2.INTER_AREA)
+    bits = (small[:, 1:] > small[:, :-1]).flatten()
+    return int("".join("1" if b else "0" for b in bits), 2)
+
+
+def near_duplicate_share(candidate: list[str], reference: list[str], max_bits: int = 4) -> tuple[float, list[str]]:
+    """Share of candidate images within max_bits Hamming distance of any reference image,
+    and the candidate paths that matched. A fork of a set you already have scores near 1."""
+    import numpy as np
+    ref = np.array([dhash(p) for p in reference], dtype=np.uint64)
+    hits = []
+    for p in candidate:
+        if not len(ref):
+            break
+        h = np.uint64(dhash(p))
+        x = np.bitwise_xor(ref, h)
+        dist = np.array([bin(int(v)).count("1") for v in x])
+        if dist.min() <= max_bits:
+            hits.append(p)
+    return (len(hits) / len(candidate) if candidate else 0.0), hits

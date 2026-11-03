@@ -144,3 +144,21 @@ def test_resample_blanks_long_gaps():
     out = resample(times, vals, np.arange(0, 0.3, 0.04), max_gap_s=0.1)
     assert np.isclose(out[1, 0], 1.2)                 # 0.04 s = 1.2 frames, interpolated
     assert np.isnan(out[3, 0])                        # 0.12 s sits in the 5-frame gap
+
+
+def test_near_duplicates_survive_reencoding(tmp_path):
+    from courtvision.training.sources import near_duplicate_share
+    rng = np.random.default_rng(0)
+    refs, cands = [], []
+    for i in range(3):
+        img = cv2.GaussianBlur(rng.integers(0, 255, (120, 160, 3), dtype=np.uint8), (15, 15), 5)
+        p = tmp_path / f"ref{i}.png"
+        cv2.imwrite(str(p), img)
+        refs.append(str(p))
+        q = tmp_path / f"fork{i}.jpg"                     # a fork re-exported at another size and quality
+        cv2.imwrite(str(q), cv2.resize(img, (128, 96)), [cv2.IMWRITE_JPEG_QUALITY, 60])
+        cands.append(str(q))
+    new = tmp_path / "new.jpg"
+    cv2.imwrite(str(new), cv2.GaussianBlur(rng.integers(0, 255, (120, 160, 3), dtype=np.uint8), (15, 15), 5))
+    share, hits = near_duplicate_share(cands + [str(new)], refs)
+    assert share == 0.75 and str(new) not in hits
