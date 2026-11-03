@@ -73,3 +73,29 @@ def merge_gt_and_pseudo(gt_players: np.ndarray, pred_xyxy: np.ndarray, pred_cls:
     xyxy = np.vstack([gt_players, pred_xyxy[keep]])
     cls = np.concatenate([np.full(len(gt_players), player_cls, int), pred_cls[keep]])
     return xyxy, cls
+
+
+def read_gt_tracks(seq: Path) -> dict[int, dict[int, list[float]]]:
+    """{frame: {track id: [x0, y0, x1, y1]}}, for scoring the tracker (MOTA / IDF1)."""
+    out: dict[int, dict[int, list[float]]] = {}
+    gt = Path(seq) / "gt" / "gt.txt"
+    if not gt.exists():
+        return out
+    for line in open(gt):
+        parts = line.strip().split(",")
+        if len(parts) < 6 or (len(parts) > 6 and float(parts[6]) == 0):
+            continue
+        f, tid = int(float(parts[0])), int(float(parts[1]))
+        x, y, w, h = map(float, parts[2:6])
+        out.setdefault(f, {})[tid] = [x, y, x + w, y + h]
+    return out
+
+
+def seq_fps(seq: Path, default: float = 25.0) -> float:
+    """Frame rate from the sequence's seqinfo.ini (SportsMOT clips are 25 fps)."""
+    ini = Path(seq) / "seqinfo.ini"
+    if ini.exists():
+        for line in open(ini):
+            if line.lower().startswith("framerate"):
+                return float(line.split("=")[1])
+    return default

@@ -99,10 +99,17 @@ class PoseConfig:
 
 @dataclass
 class OutputConfig:
+    # 2d: court x, y for every player and the ball (tracking_2d.csv), no 3D work.
+    # 3d: also the camera, ball height, scene.json and the 3D viewer (the earlier pipeline).
+    mode: str = "2d"
+    # tracking_2d is resampled to this rate (None keeps the video's frames). Detection, tracking and
+    # possession still run on every video frame: the ball moves ~1 m per frame on a pass at 30 fps,
+    # and ByteTrack loses players in the paint if it only sees every third frame.
+    tracking_fps: float | None = 10.0
     dir: str = "output"
     cache_dir: str | None = "stubs"
     write_video: bool = True
-    write_3d_html: bool = True
+    write_3d_html: bool = True         # only in mode 3d
     viewer: str = "bodies"              # bodies (three.js animated players) | plotly (dots)
     character_glb: str | None = None    # rigged Mixamo-style .glb used for every player in the bodies viewer
     write_diagnostics: bool = True      # diagnostics.json / _frames.csv / .png: which stage is weak

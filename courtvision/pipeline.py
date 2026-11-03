@@ -1,4 +1,4 @@
-"""End-to-end orchestration: video in, tracking data + events + 3D scene out.
+"""End-to-end orchestration: video in, 2D court tracking + events out (3D optional).
 
 Stages (each cached to ``output.cache_dir`` so re-runs only redo what changed):
 
@@ -10,9 +10,11 @@ Stages (each cached to ``output.cache_dir`` so re-runs only redo what changed):
     5. possession              per-frame holder with hysteresis
     6. events                  passes, interceptions, turnovers, shots, rebounds
     7. court projection        metres (tracks re-linked, positions smoothed), speed and distance
-    8. 3D                      ball height from physics, player skeletons (optional), scene export
-    9. outputs                 touches (CSV + Parquet, the main table), events, tracking,
-                               box score, JSON scene, 3D HTML, annotated video, diagnostics
+    8. 2D ball                 the ball's floor position from held / flight / floor (tracking2d)
+    9. 3D (output.mode: 3d)    ball height from physics, player skeletons (optional), scene export
+   10. outputs                 tracking_2d (x, y for every player and the ball at output.tracking_fps),
+                               touches, events, box score, annotated video, diagnostics;
+                               in 3d mode also tracking.csv with ball height, scene.json, 3D HTML
 
 Frames are streamed, never all held in memory, so a full game works on Colab.
 """
@@ -34,7 +36,8 @@ from .events.shots import detect_shots
 from .events.timeline import annotate_shots, box_score, events_table, touches_table, tracking_table
 from .io.cache import cache_key, cached
 from .io.video import iter_frames, read_frames_at, video_info
-from .possession.acquisition import NO_POSSESSION, detect_possession, possession_segments, team_control
+from .possession.acquisition import (NO_POSSESSION, detect_possession, frame_holder, possession_segments,
+                                     team_control)
 from .recon3d.ball3d import cameras_for_frames, reconstruct_ball_3d
 from .pose.lift import lift_poses
 from .recon3d.scene import build_scene, save_scene_json, scene_to_plotly
@@ -42,6 +45,7 @@ from .recon3d.viewer import scene_to_threejs
 from .metrics.speed_distance import speed_and_distance
 from .tactical.projector import project_tracks, smooth_court_positions
 from .teams.team_assigner import TeamAssigner
+from .tracking2d import ball_court_track, coverage, tracking_2d_table
 from .types import PipelineResult
 
 log = logging.getLogger(__name__)
@@ -123,7 +127,7 @@ class Pipeline:
         self.team_colors_bgr = TeamAssigner.team_bgr(assigner.team_colors)
 
         poses2d = None
-        if c.pose.enabled:
+        if c.pose.enabled and c.output.mode == "3d":
             poses2d = cached(cache, cache_key(video, "pose", c.pose.model, c.pose.imgsz, c.pose.conf,
                                               c.pose.match_iou, c.models.detector, c.detection),
                              lambda: self.estimate_poses(video, det.players, total))
@@ -167,16 +171,22 @@ class Pipeline:
 
         annotate_shots(events, court_pos, self.court)
         speed, dist = speed_and_distance(court_pos, fps, c.metrics.speed_window_frames, c.metrics.max_speed_mps)
-        cams = cameras_for_frames(homographies, size)
-        ball_3d = reconstruct_ball_3d(ball, possessor, cams, court_pos, fps)
-        pose_3d = (lift_poses(poses2d, cams, court_pos, c.pose.player_height_m, c.pose.min_keypoint_conf,
-                              c.pose.smooth_window) if poses2d else {})
+        contact = [frame_holder(p, b, c.possession.max_distance_ratio) for p, b in zip(players, ball)]
+        ball_court, ball_src = ball_court_track(ball, possessor, court_pos, homographies, self.court, events, fps,
+                                                contact=contact)
+        ball_3d, pose_3d = [None] * len(ball), {}
+        if c.output.mode == "3d":
+            cams = cameras_for_frames(homographies, size)
+            ball_3d = reconstruct_ball_3d(ball, possessor, cams, court_pos, fps)
+            pose_3d = (lift_poses(poses2d, cams, court_pos, c.pose.player_height_m, c.pose.min_keypoint_conf,
+                                  c.pose.smooth_window) if poses2d else {})
 
         return PipelineResult(fps=fps, frame_size=size, players=players, referees=det.referees, ball=ball,
                               hoops=det.hoops, team_of=team_of, possessor=possessor, possessions=segments,
                               events=events, homographies=homographies, court_positions=court_pos,
                               speed_kmh=speed, distance_m=dist, ball_3d=ball_3d,
-                              pose_3d=pose_3d, calibration=calibration or [], track_remap=remap)
+                              pose_3d=pose_3d, calibration=calibration or [], track_remap=remap,
+                              ball_court=ball_court, ball_court_source=ball_src)
 
     # ----------------------------------------------------------------- outputs
     def write_outputs(self, result: PipelineResult, video: Path, out_dir: Path) -> None:
@@ -191,6 +201,16 @@ class Pipeline:
         events.to_csv(out_dir / "events.csv", index=False)
         box_score(events, touches).to_csv(out_dir / "box_score.csv", index=False)
         if result.court_positions:
+            t2d = tracking_2d_table(result, result.ball_court, result.ball_court_source,
+                                    self.cfg.output.tracking_fps)
+            t2d["team"] = t2d["team"].map(lambda t: names[int(t)] if t in (0, 1) else None)
+            t2d.to_csv(out_dir / "tracking_2d.csv", index=False)
+            try:
+                t2d.to_parquet(out_dir / "tracking_2d.parquet", index=False)
+            except ImportError:
+                pass
+            log.info("2D coverage: %s", coverage(t2d))
+        if result.court_positions and self.cfg.output.mode == "3d":
             tracking_table(result).to_csv(out_dir / "tracking.csv", index=False)
             scene = build_scene(result, self.court, names)
             save_scene_json(scene, out_dir / "scene.json")
@@ -253,9 +273,8 @@ class Pipeline:
 
             if result.homographies[f] is not None and ids:
                 pos = {t: result.court_positions[t][f] for t in ids if result.court_positions[t][f] is not None}
-                b3 = result.ball_3d[f]
-                mini = renderer.render(pos, result.team_of, self.team_colors_bgr,
-                                       ball=(b3[0], b3[1]) if b3 else None,
+                bc = result.ball_court[f] if f < len(result.ball_court) else None
+                mini = renderer.render(pos, result.team_of, self.team_colors_bgr, ball=bc,
                                        possessor=holder if holder != NO_POSSESSION else None)
                 paste_minimap(frame, mini)
             cv2.putText(frame, f"{f}", (w - 80, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "courtvision"
 version = "0.1.0"
-description = "Basketball broadcast video to tracking data, touch-by-touch events and 3D play reconstructions."
+description = "Basketball broadcast video to 2D court tracking of every player and the ball, and touch-by-touch events."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

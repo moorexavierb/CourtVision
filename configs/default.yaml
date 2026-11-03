@@ -58,7 +58,7 @@ metrics:
   speed_window_frames: 5
   max_speed_mps: 11.0
 
-pose:
+pose:                      # 3d mode only
   enabled: false           # 2D body keypoints per player, lifted to 3D skeletons in scene.json
   model: yolo11m-pose.pt   # any ultralytics COCO-17 pose model
   imgsz: 1280
@@ -70,10 +70,12 @@ pose:
   smooth_window: 5
 
 output:
+  mode: 2d                 # 2d: court x, y for every player and the ball | 3d: also camera, ball height, scene, viewer
+  tracking_fps: 10         # tracking_2d sample rate (null = every video frame); models still run on every frame
   dir: output
   cache_dir: stubs
   write_video: true
-  write_3d_html: true
+  write_3d_html: true      # 3d mode only
   viewer: bodies           # bodies (animated three.js players) | plotly (dots)
   character_glb: null      # optional rigged Mixamo-style .glb used for every player
   write_diagnostics: true  # diagnostics.json, diagnostics_frames.csv, diagnostics.png

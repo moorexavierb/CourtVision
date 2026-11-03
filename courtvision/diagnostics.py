@@ -209,14 +209,16 @@ def diagnose(raw_players: PlayerTracks, ball_candidates: list[list[dict]], resul
     clean = np.array([b is not None for b in result.ball])
     held = np.array([p != NO_POSSESSION for p in result.possessor])
     b3 = np.array([b is not None for b in result.ball_3d])
+    b2 = np.array([b is not None for b in result.ball_court]) if result.ball_court else np.zeros(n, bool)
     ball_block = {"raw_detection_share": round(float(raw_ball.mean()), 3) if n else 0.0,
                   "after_cleaning_share": round(float(clean.mean()), 3) if n else 0.0,
                   "possession_share": round(float(held.mean()), 3) if n else 0.0,
+                  "court_xy_share": round(float(b2.mean()), 3) if n else 0.0,
                   "ball_3d_share": round(float(b3.mean()), 3) if n else 0.0}
     if ball_block["raw_detection_share"] < 0.5:
         findings.append((2, "ball detection",
                          f"The ball is detected in only {ball_block['raw_detection_share']:.0%} of frames, so possession, "
-                         "passes and the 3D ball are guessed. Train a dedicated ball model at imgsz 1280 on broadcast "
+                         "passes and the ball's court position are guessed. Train a dedicated ball model at imgsz 1280 on broadcast "
                          "frames and set models.ball_detector."))
 
     pose_block = None
@@ -259,7 +261,8 @@ def format_report(summary: dict) -> str:
         + (f", colour separation {t['colour_separation_lab']}, {pct(t['ambiguous_tracks_share'])} ambiguous"
            if "colour_separation_lab" in t else ""),
         f"Ball            detected {pct(b['raw_detection_share'])}, after cleaning {pct(b['after_cleaning_share'])}, "
-        f"possession {pct(b['possession_share'])}, 3D {pct(b['ball_3d_share'])}",
+        f"possession {pct(b['possession_share'])}, court x,y {pct(b.get('court_xy_share', 0))}"
+        + (f", 3D {pct(b['ball_3d_share'])}" if b.get("ball_3d_share") else ""),
         "",
     ]
     if summary["findings"]:

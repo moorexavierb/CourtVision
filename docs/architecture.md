@@ -101,7 +101,35 @@ Players are projected by their foot point (bottom-centre of the box).
 Positions are median-filtered before differencing; steps faster than
 `max_speed_mps` are treated as noise.
 
-## 8. 3D (`recon3d/`)
+## 8. 2D court tracking (`tracking2d.py`), the default output
+
+`output.mode: 2d` (default) stops at court x, y: no camera recovery, no ball
+height, no pose pass, no scene export. `tracking_2d.csv`/`.parquet` holds every
+player and the ball on a uniform clock (`output.tracking_fps`, 10 Hz by
+default).
+
+* Players: smoothed foot-point projections, linearly resampled; a sample is left
+  empty when the nearest observations are more than 0.2 s apart.
+* Ball: a floor homography is wrong for a ball in the air, so its floor point
+  comes from what it is doing. Held: the holder's position, while the raw
+  per-frame contact says the ball is at their hands (possession hysteresis would
+  otherwise keep it with the passer after the release). In flight: a ball in the
+  air has constant horizontal velocity, so the point under it moves in a
+  straight line at constant speed from release to catch; linear interpolation in
+  time is the exact ground track, without solving for height. Shots go from the
+  release to the rim at the attempt (or make) frame, then to the rebounder.
+  Loose: the bottom of the ball box projected through the homography.
+  `source` says which.
+* Detection, tracking and possession still run on every video frame; only the
+  output is resampled. ByteTrack and the possession hysteresis are tuned for
+  full frame rate, and a pass covers about 1 m per frame at 30 fps.
+
+Known limits: the ball's floor point during a dribble is the holder's position
+(within an arm's length); bounce passes are drawn as straight lines (right in
+x, y, they only bounce in z); a pass whose catch is missed by the detector has
+no end point and falls back to floor projection.
+
+## 9. 3D (`recon3d/`, `output.mode: 3d` only)
 
 * Held ball: height is where the camera ray through the ball pixel passes
   closest to the holder's vertical axis.
@@ -112,7 +140,7 @@ Positions are median-filtered before differencing; steps faster than
   discarded.
 * Players stand on the floor (z = 0) at their projected position.
 
-## 9. Player bodies (`pose/`, `recon3d/viewer.py`)
+## 10. Player bodies (`pose/`, `recon3d/viewer.py`, `output.mode: 3d` only)
 
 Optional (`pose.enabled`). A YOLO pose model finds COCO-17 body keypoints on
 each frame; each detected person is matched to a player track by box overlap,
@@ -138,10 +166,30 @@ Mixamo-style `.glb` (`output.character_glb`) replaces the mannequin and is
 retargeted from the same skeleton. `output.viewer: plotly` keeps the older
 dot view.
 
+## Training data and cross-dataset validation (`training/`)
+
+Notebook 01 trains the detector from several *sources* (`training/sources.py`):
+the Roboflow set, SportsMOT basketball (players labelled, other classes
+pseudo-labelled by the current detector), other Roboflow Universe sets, own
+labelled broadcast frames, held-out test clips and hard negatives. Each image
+keeps its source and a group (the video or sequence; Roboflow's augmented
+copies of one image share a group), and splits are made per source by group,
+so no video is on both sides. Exact duplicate images across sources are kept
+once.
+
+Validation is per source, plus leave-one-dataset-out folds (train on the other
+sources, test on all of the held-out one) and optional grouped k-fold.
+`training/evaluate.py` scores what the pipeline needs at its own thresholds:
+per-frame player recall and share of frames with every player found, ball
+precision and recall, phantom-ball frames, and MOTA / IDF1 through ByteTrack on
+held-out SportsMOT sequences. The new model replaces `player_detector.pt` only
+if it beats the current one on the broadcast sources.
+
 ## Roadmap
 
 * Jersey-number OCR to turn track IDs into real players (and re-link IDs after long occlusions).
 * More court landmarks for close-up coverage.
-* Learned 3D lifting or SMPL fitting for player bodies; hand and head detail.
+* Cross-dataset validation for the court keypoint model (notebook 02), which limits 2D coverage
+  on zoomed views as much as the detector does.
 * Shot outcome from hoop/net motion as a second signal.
 * Full-game batching: split by camera cuts, run segments in parallel.

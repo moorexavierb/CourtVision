@@ -1,16 +1,22 @@
 # CourtVision
 
-Basketball game video in; tracking data, touch-by-touch events and 3D play reconstructions out.
+Basketball broadcast video in; court x, y for every on-court player and the ball, 10 times a
+second, plus touch-by-touch events out.
 
-The goal is to take videos of professional basketball games (NBA, NCAA) and use YOLO detection and tracking to return box score stats and advanced statistical analysis from any video.
+The goal is to take videos of professional basketball games (NBA, NCAA) and use YOLO detection and
+tracking to return player-tracking data and the box score and advanced stats built on it, from any video.
 
 ```
 broadcast video ──► detect + track ──► teams ──► possession ──► passes / interceptions / shots
-                         │                                              │
-                         └─► court keypoints ─► homography ─► camera ──►├─► court positions (m), speed, distance
-                                                                        ├─► 3D ball (physics) ──────────────┐
-                                                                        └─► body keypoints ─► 3D skeletons ─┴─► 3D scene, animated players
+                         │                            │
+                         └─► court keypoints ─► homography (tracked through pans)
+                                                      │
+                                                      ├─► players: court x, y (m), speed, distance
+                                                      └─► ball: held / flight / floor ─► tracking_2d at 10 Hz
 ```
+
+The 3D reconstruction (camera, ball height, player bodies) is still in the package, off by
+default: `output.mode: 3d`.
 
 Starting point: [abdullahtarek/basketball_analysis](https://github.com/abdullahtarek/basketball_analysis).
 What CourtVision does beyond it:
@@ -21,25 +27,28 @@ What CourtVision does beyond it:
 | Homography | Per frame, no checks | RANSAC, reprojection-error gate, hold through dropouts, smoothing with cut detection |
 | Camera | Floor plane only | Full camera (focal, pose) recovered per frame, so points off the floor can be projected |
 | Ball | Highest-confidence box, linear fill | Continuity-aware selection, outlier rejection, gap-limited interpolation |
-| Ball height | None | Physics fit: parabolic flight (gravity) fitted to every frame of a pass or shot |
-| Players in 3D | None | Animated bodies (gait from speed, stances, shots, passes), 3D skeletons lifted from video, rigged characters |
+| Ball on the court | Projects the ball box (wrong whenever it's in the air) | Holder's spot when held, exact straight ground track of a pass or shot, floor projection only when loose |
+| Output clock | Every video frame | Uniform 10 Hz `tracking_2d` (configurable), models still run on every frame |
+| Training data | One Roboflow set, random split | Several sources (Roboflow, SportsMOT, own broadcast frames), split by video, scored per dataset and leave-one-dataset-out |
 | Teams | Zero-shot CLIP per frame | Per-track decision (no flicker): jersey-colour clustering by default, CLIP optional |
 | Possession | Per-frame nearest player | Hand-point distance scaled by player size, with hysteresis |
 | Events | Passes, interceptions | + turnovers, shot attempts, makes, 2PT/3PT, shot distance, offensive/defensive rebounds |
-| Data out | Annotated video | `touches.parquet`/`.csv` (main table), `events.csv`, `tracking.csv`, `box_score.csv`, `scene.json`, interactive 3D HTML, video |
+| Data out | Annotated video | `tracking_2d.parquet`/`.csv`, `touches.parquet`/`.csv`, `events.csv`, `box_score.csv`, video, diagnostics |
 | Memory | Whole video in RAM | Frames streamed; full games fit in Colab |
 | Tests | None | Unit tests plus a synthetic end-to-end clip with a known camera |
 
 ## Quick start (Colab)
 
-1. `notebooks/01_train_detector.ipynb` trains the player / ball / hoop detector.
+1. `notebooks/01_train_detector.ipynb` trains the player / ball / hoop detector on several datasets
+   at once and scores it on each (per-frame player recall, ball precision / recall, MOTA / IDF1),
+   with leave-one-dataset-out cross-validation.
 2. `notebooks/02_train_court_keypoints.ipynb` trains the court keypoint model.
-3. `notebooks/00_end_to_end_colab.ipynb` runs everything on a video and shows the tables, 3D play and annotated video.
+3. `notebooks/00_end_to_end_colab.ipynb` runs everything on a video and shows the 2D tracking, a top-down replay, the touches table and the annotated video.
 4. `notebooks/03_collect_frames_to_label.ipynb` picks the frames of your own clips the models get wrong and
    exports them with pre-labels for Roboflow. Correct them, then retrain with 01 and 02, which merge them in.
 
 All four save to `MyDrive/courtvision/`, so weights and runs survive Colab disconnects.
-Put your Roboflow key in Colab **Secrets** as `ROBOFLOW_API_KEY`.
+Put your Roboflow key in Colab **Secrets** as `ROBOFLOW_API_KEY` (and a Hugging Face read token as `HF_TOKEN` for SportsMOT).
 
 ## Quick start (local)
 
@@ -56,12 +65,12 @@ Outputs land in `output/<video name>/`.
 
 | File | Contents |
 |---|---|
+| `tracking_2d.parquet`, `tracking_2d.csv` | **The main table.** Every on-court player and the ball, 10 samples per second: time, id, team, `x_m`, `y_m`, speed, who has the ball, and for the ball how its position was found (`held`, `flight`, `floor`) |
 | `events.csv` | One row per event: `pass`, `interception`, `turnover`, `shot`, `made_shot`, `offensive_rebound`, `defensive_rebound`, with time, player, team, target, and for shots the location, distance and points |
-| `touches.parquet`, `touches.csv` | **The main table.** One row per touch: player, how the touch started (catch, steal, rebound), the action (pass, shot, turnover) with outcome and target, dribbles, the handler's position, speed and nearest defender, every other player's id, position and speed at that moment, and a confidence score |
-| `tracking.csv` | Every player and the ball, every frame, in court metres (ball includes height), with speed and running distance |
+| `touches.parquet`, `touches.csv` | One row per touch: player, how the touch started (catch, steal, rebound), the action (pass, shot, turnover) with outcome and target, dribbles, the handler's position, speed and nearest defender, every other player's id, position and speed at that moment, and a confidence score |
+| `tracking.csv` | 3d mode: every player and the ball, every frame, ball with height |
 | `box_score.csv` | Per player: touches, time of possession, passes, interceptions, turnovers, FGA/FGM, 3PA/3PM |
-| `scene.json` | Per-frame 3D scene for any front-end (three.js, Unity, Blender) |
-| `play_3d.html` | Animated 3D reconstruction with player bodies (three.js); open it in any browser |
+| `scene.json`, `play_3d.html` | 3d mode: per-frame 3D scene and animated three.js viewer |
 | `<video>_annotated.mp4` | Broadcast overlay: IDs, team colours, ball, holder, possession %, passes, minimap |
 
 ## Layout
@@ -89,7 +98,10 @@ courtvision/
   pose/                     2D body keypoints per track, lifted to 3D skeletons with the camera
   recon3d/                  3D ball from physics, scene export (JSON), three.js body viewer, Plotly
   viz/annotate.py           video overlays
-  training/                 dataset merge and re-split, zoomed court crops, hard-frame mining
+  training/                 multi-dataset build with grouped splits and cross-dataset folds (sources.py),
+                            pipeline-style scores and MOTA / IDF1 (evaluate.py), SportsMOT and COCO
+                            converters, zoomed court crops, hard-frame mining
+  tracking2d.py             court x, y for players and the ball on a fixed clock (main output)
   pipeline.py               orchestration
   cli.py                    `courtvision run ...`
 notebooks/                  Colab: end-to-end, detector training, keypoint training, frame collection

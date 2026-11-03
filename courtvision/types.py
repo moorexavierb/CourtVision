@@ -85,5 +85,8 @@ class PipelineResult:
     calibration: list[dict] = field(default_factory=list)
     # track id -> id it was merged into by re-linking
     track_remap: dict[int, int] = field(default_factory=dict)
+    # per-frame ball position on the floor (x, y metres) and how it was found: held | flight | floor
+    ball_court: list[Optional[tuple[float, float]]] = field(default_factory=list)
+    ball_court_source: list[Optional[str]] = field(default_factory=list)
     diagnostics: Optional[dict] = None
     diagnostics_frames: Optional[object] = None  # pandas DataFrame, one row per frame

@@ -68,7 +68,7 @@ def test_synthetic_play(tmp_path, broadcast_cam):
     det = DetectionResult(players=players, referees=[{} for _ in range(n)], ball_candidates=ball_c,
                           hoops=[None] * n)
 
-    cfg = Config.load(None, output={"dir": str(tmp_path / "out"), "cache_dir": None})
+    cfg = Config.load(None, output={"dir": str(tmp_path / "out"), "cache_dir": None, "mode": "3d"})
     pipe = Pipeline(cfg)
     assigner = TeamAssigner(cfg.teams)
     team_of = assigner.assign(frames, players)
@@ -88,6 +88,16 @@ def test_synthetic_play(tmp_path, broadcast_cam):
     assert np.allclose(result.court_positions[3][0], (9.0, 4.0), atol=0.05)
     assert abs(result.speed_kmh[1][-1] - 1.5 * 3.6) < 0.3
 
+    # 2D: the ball's floor point follows the straight ground line of the lob, at constant speed.
+    # (Possession hysteresis keeps the passer as holder for a few frames after the release.)
+    flight = [f for f in range(25, 55) if result.ball_court_source[f] == "flight"]
+    assert len(flight) >= 15, result.ball_court_source[20:60]
+    for f in flight:
+        tt = (f - 25) / fps
+        truth = (8.0 + 0.05 * f + 4.0 * tt, 6.0 + 3.0 * tt)
+        assert np.hypot(*np.subtract(result.ball_court[f], truth)) < 0.8, (f, result.ball_court[f], truth)  # ball is an arm away from the feet
+    assert result.ball_court_source[10] == "held" and result.ball_court_source[80] == "held"
+
     # The lob peaks well above the 1 m hold height.
     peak = max(b[2] for b in result.ball_3d[25:55] if b is not None)
     assert abs(peak - 2.23) < 0.3, peak
@@ -95,7 +105,8 @@ def test_synthetic_play(tmp_path, broadcast_cam):
     out_dir = tmp_path / "out" / "synthetic"
     out_dir.mkdir(parents=True)
     pipe.write_outputs(result, video, out_dir)
-    for name in ["touches.csv", "touches.parquet", "events.csv", "box_score.csv", "tracking.csv", "scene.json",
+    for name in ["tracking_2d.csv", "tracking_2d.parquet", "touches.csv", "touches.parquet", "events.csv",
+                 "box_score.csv", "tracking.csv", "scene.json",
                  "play_3d.html", "synthetic_annotated.mp4"]:
         assert (out_dir / name).exists(), name
     scene = json.loads((out_dir / "scene.json").read_text())
@@ -118,3 +129,39 @@ def test_synthetic_play(tmp_path, broadcast_cam):
     assert t1.nearest_defender_id == 3 and abs(t1.nearest_defender_m - np.hypot(1, 2)) < 0.1
     assert abs(t1.speed_kmh - 5.4) < 0.5 and abs(t1.op1_speed_kmh - 5.4) < 0.5
     assert 0 < t1.confidence <= 1
+
+
+def test_2d_mode_outputs(tmp_path, broadcast_cam):
+    """Default mode: tracking_2d at 10 Hz with every player and the ball, and no 3D files."""
+    P, K, R, t, size = broadcast_cam
+    H = floor_homography(P)
+    fps, n = 30.0, 60
+    players, ball_c = [], []
+    for f in range(n):
+        players.append({tid: {"bbox": player_box(P, x + 0.1 * f, y), "conf": 0.9}
+                        for tid, (x, y) in {1: (8.0, 6.0), 2: (12.0, 9.0)}.items()})
+        u, v = project(P, np.array([8.0 + 0.1 * f, 6.0, 1.0]))[0]
+        ball_c.append([{"bbox": [u - 4, v - 4, u + 4, v + 4], "conf": 0.6}])
+    det = DetectionResult(players=players, referees=[{} for _ in range(n)], ball_candidates=ball_c,
+                          hoops=[None] * n)
+    frames = [np.full((size[1], size[0], 3), 128, np.uint8) for _ in range(n)]
+    video = tmp_path / "clip.mp4"
+    save_video(frames, video, fps)
+    cfg = Config.load(None, output={"dir": str(tmp_path / "out"), "cache_dir": None, "write_video": False})
+    assert cfg.output.mode == "2d" and cfg.output.tracking_fps == 10.0
+    pipe = Pipeline(cfg)
+    result = pipe.analyze(det, [H] * n, {1: 0, 2: 1}, fps, size)
+    assert all(b is None for b in result.ball_3d)
+    out_dir = tmp_path / "out" / "clip"
+    out_dir.mkdir(parents=True)
+    pipe.write_outputs(result, video, out_dir)
+    assert not (out_dir / "scene.json").exists() and not (out_dir / "play_3d.html").exists()
+    t2d = pd.read_csv(out_dir / "tracking_2d.csv")
+    assert t2d["sample"].nunique() == 20                     # 59 frames at 30 fps = 1.97 s -> 20 samples
+    assert np.allclose(np.diff(sorted(t2d.time_s.unique())), 0.1)
+    per = t2d.groupby("sample")["object"].value_counts().unstack()
+    assert (per["player"] == 2).all() and (per["ball"] == 1).all()
+    p1 = t2d[(t2d.object == "player") & (t2d.id == 1)].set_index("time_s")
+    assert abs(p1.loc[1.0, "x_m"] - (8.0 + 0.1 * 30)) < 0.1     # 3 m/s drift, resampled on the 10 Hz clock
+    ball = t2d[t2d.object == "ball"]
+    assert (ball.source == "held").mean() > 0.8 and set(p1.team) == {"Team A"}
