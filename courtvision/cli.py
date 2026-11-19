@@ -1,4 +1,4 @@
-"""Command line: ``courtvision run input_videos/game.mp4 --config configs/default.yaml``."""
+"""``courtvision game.mp4 --config configs/default.yaml``: writes output/<video>/tracking.parquet."""
 from __future__ import annotations
 
 import argparse
@@ -6,25 +6,23 @@ import logging
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(prog="courtvision")
-    sub = parser.add_subparsers(dest="cmd", required=True)
-    run = sub.add_parser("run", help="Run the full pipeline on a video")
-    run.add_argument("video")
-    run.add_argument("--config", default=None)
-    run.add_argument("--output", default=None, help="Output folder (default: output.dir in config)")
-    run.add_argument("--no-video", action="store_true", help="Skip writing the annotated video")
-    args = parser.parse_args(argv)
-
+    ap = argparse.ArgumentParser(prog="courtvision", description=__doc__)
+    ap.add_argument("video")
+    ap.add_argument("--config", default="configs/default.yaml")
+    ap.add_argument("--out", default=None, help="output folder (default: output.dir/<video name>)")
+    ap.add_argument("--hz", type=float, default=None, help="samples per second (default from config: 10)")
+    ap.add_argument("--no-video", action="store_true", help="skip the annotated video")
+    a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     from .config import Config
-    from .pipeline import Pipeline
-
-    cfg = Config.load(args.config)
-    if args.no_video:
+    from .pipeline import run
+    cfg = Config.load(a.config)
+    if a.hz:
+        cfg.output.hz = a.hz
+    if a.no_video:
         cfg.output.write_video = False
-    result = Pipeline(cfg).run(args.video, args.output)
-    print(f"{len(result.players)} frames, {len(result.team_of)} player tracks, "
-          f"{len(result.possessions)} touches, {len(result.events)} events")
+    r = run(a.video, cfg, a.out)
+    print(r.diagnostics["dataset"])
 
 
 if __name__ == "__main__":
