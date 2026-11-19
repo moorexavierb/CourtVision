@@ -2,8 +2,8 @@
 # courtvision/config.py, and an unknown key is an error (so a typo can't be silently ignored).
 
 models:
-  detector: models/player_detector.pt         # YOLO detect: Player, Ref, Ball, Hoop (notebook 01)
-  court_keypoints: models/court_keypoints.pt  # YOLO pose: 18 court landmarks (notebook 02)
+  detector: models/player_detector.pt         # YOLO detect: Player, Ref, Ball, Hoop (notebook 01, part A)
+  court_keypoints: models/court_keypoints.pt  # YOLO pose: 18 court landmarks (notebook 01, part B)
   device: null                                # null = cuda if available
 
 detection:

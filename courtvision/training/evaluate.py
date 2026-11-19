@@ -110,25 +110,67 @@ def summarise(frames: list[dict], expected_players: Optional[int] = None) -> dic
     return report
 
 
-def score_images(model, images: Iterable[str], class_names: list[str], conf: dict[str, float],
-                 imgsz: int = 1280, iou_thr: float = 0.5, batch: int = 16) -> list[dict]:
-    """Run an Ultralytics model over YOLO-labelled images and score every frame (needs a GPU stack).
-    conf: {class name: threshold} for the classes to score."""
+def predict_images(model, images: Iterable[str], class_names: list[str], imgsz: int = 1280,
+                   min_conf: float = 0.05, batch: int = 16) -> list[tuple]:
+    """Run an Ultralytics model once over YOLO-labelled images (needs a GPU stack). Returns one
+    (gt_xyxy, gt_cls, pred_xyxy, pred_cls, pred_conf) per image, in our class ids, so scores at
+    any threshold above min_conf can be computed without running the model again."""
     images = list(images)
-    wanted = {n: class_names.index(n) for n in conf if n in class_names}
     model_ids = {v: k for k, v in model.names.items()}
     remap = {model_ids[n]: class_names.index(n) for n in class_names if n in model_ids}
-    min_conf = min(conf.values())
-    frames = []
+    out = []
     for i in range(0, len(images), batch):
         for res in model.predict(images[i:i + batch], imgsz=imgsz, conf=min_conf, verbose=False):
             h, w = res.orig_shape
             g_xyxy, g_cls = read_yolo(label_path(res.path), (w, h))
             b = res.boxes
             p_cls = np.array([remap.get(int(c), -1) for c in b.cls.cpu().numpy()], int)
-            frames.append(frame_scores(g_xyxy, g_cls, b.xyxy.cpu().numpy(), p_cls, b.conf.cpu().numpy(),
-                                       wanted, conf, iou_thr))
-    return frames
+            out.append((g_xyxy, g_cls, b.xyxy.cpu().numpy(), p_cls, b.conf.cpu().numpy()))
+    return out
+
+
+def score_predictions(preds: list[tuple], class_names: list[str], conf: dict[str, float],
+                      iou_thr: float = 0.5) -> list[dict]:
+    """frame_scores for every image of predict_images, each class in conf at its own threshold."""
+    wanted = {n: class_names.index(n) for n in conf if n in class_names}
+    return [frame_scores(g, gc, p, pc, pf, wanted, conf, iou_thr) for g, gc, p, pc, pf in preds]
+
+
+def score_images(model, images: Iterable[str], class_names: list[str], conf: dict[str, float],
+                 imgsz: int = 1280, iou_thr: float = 0.5, batch: int = 16) -> list[dict]:
+    """Run an Ultralytics model over YOLO-labelled images and score every frame (needs a GPU stack).
+    conf: {class name: threshold} for the classes to score."""
+    preds = predict_images(model, images, class_names, imgsz, min(conf.values()), batch)
+    return score_predictions(preds, class_names, conf, iou_thr)
+
+
+def threshold_sweep(preds: list[tuple], class_names: list[str], name: str, grid: Iterable[float],
+                    beta: float = 1.0) -> pd.DataFrame:
+    """Precision, recall and F-beta of one class at each threshold in grid (rows), from one
+    predict_images pass. beta > 1 weighs recall more: for players a missed box is a missing
+    court position, while a low-confidence extra box is mostly dropped by the tracker."""
+    rows = {}
+    for c in grid:
+        frames = score_predictions(preds, class_names, {name: float(c)})
+        tp = sum(f[name]["tp"] for f in frames)
+        fp = sum(f[name]["fp"] for f in frames)
+        fn = sum(f[name]["fn"] for f in frames)
+        p = tp / (tp + fp) if tp + fp else 0.0
+        r = tp / (tp + fn) if tp + fn else 0.0
+        f = (1 + beta ** 2) * p * r / (beta ** 2 * p + r) if p + r else 0.0
+        rows[round(float(c), 3)] = {"precision": round(p, 3), "recall": round(r, 3), f"f{beta:g}": round(f, 4),
+                                    "phantom_frame_share": round(float(np.mean([x[name]["fp"] > 0 for x in frames])), 3) if frames else None}
+    return pd.DataFrame(rows).T.rename_axis("conf")
+
+
+def best_threshold(sweep: pd.DataFrame, metric: str, min_precision: float = 0.0) -> float:
+    """The threshold with the highest metric among those with precision >= min_precision (the
+    highest-precision one if none qualifies). Ties go to the higher threshold."""
+    ok = sweep[sweep.precision >= min_precision]
+    if ok.empty:
+        return float(sweep.precision.idxmax())
+    best = ok[metric].max()
+    return float(max(ok.index[ok[metric] == best]))
 
 
 # ----------------------------------------------------------------- tracking

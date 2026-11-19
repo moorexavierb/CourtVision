@@ -227,6 +227,6 @@ def ball_table(dets: pd.DataFrame, tracks: pd.DataFrame, remap: dict[int, int], 
     rim = near_hoop(px, hoop_boxes(dets, n))
     xy, src = court_track(px, who, positions, homographies, court, rim, fps, cfg.max_flight_s)
     detected = np.zeros(n, bool)
-    detected[dets[dets.role == "ball"].frame.unique()] = True
+    detected[dets[dets.role == "ball"].frame.unique().astype(int)] = True
     return pd.DataFrame({"frame": np.arange(n), "u": (px[:, 0] + px[:, 2]) / 2, "v": (px[:, 1] + px[:, 3]) / 2,
                          "detected": detected, "holder": who, "x_m": xy[:, 0], "y_m": xy[:, 1], "source": src})

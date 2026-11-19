@@ -1,4 +1,4 @@
-"""Pick frames from your own NBA clips that are worth labelling (notebook 03).
+"""Pick frames from your own NBA clips that are worth labelling (notebook 02).
 
 On a real NBA clip the models found 5.9 of 10 players and 5.2 of 18 court keypoints per frame.
 The fastest way to close that gap is to label the frames the current models get wrong. Each frame gets a score from the models'

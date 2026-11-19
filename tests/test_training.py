@@ -51,6 +51,8 @@ def test_sportsmot_to_yolo_groups_by_game(tmp_path):
         for f in range(1, 21):
             _img(rng, d / "img1" / f"{f:06d}.jpg")
         (d / "gt" / "gt.txt").write_text("".join(f"{f},{i},{5 + 20 * i},10,8,20,1,1,1\n" for f in range(1, 21) for i in (1, 2)))
+    (root / "splits_txt").mkdir()
+    (root / "splits_txt" / "basketball.txt").write_text("v_game1_c001\nv_game2_c003\nv_game1_c002\n")
     counts = sportsmot.to_yolo(str(root), str(tmp_path / "yolo"), DETECT_CLASSES, stride=5)
     assert counts == {"frames": 12, "skipped": 0, "sequences": 3, "games": 2}
     stems = [p.stem for p in (tmp_path / "yolo" / "train" / "images").glob("*.jpg")]
@@ -221,17 +223,75 @@ def test_sportsmot_basketball_zip_keeps_only_basketball(tmp_path):
     info = sportsmot.basketball_zip(str(raw), str(tmp_path / "bb.zip"))
     assert info["sequences"] == {"train": 1, "val": 1}
     got = set(zipfile.ZipFile(tmp_path / "bb.zip").namelist())
-    assert got == {"splits_txt/basketball.txt", "splits_txt/football.txt", "train/v_b1_c001/img1/000001.jpg",
+    assert got == {"splits_txt/basketball.txt", "train/v_b1_c001/img1/000001.jpg",
                    "train/v_b1_c001/gt/gt.txt", "val/v_b2_c001/img1/000001.jpg", "val/v_b2_c001/gt/gt.txt"}
     root = sportsmot.unpack(str(tmp_path / "bb.zip"), str(tmp_path / "sm"))
     assert [s.name for s in sportsmot.basketball_sequences(root, "train")] == ["v_b1_c001"]
     # The same from a .tar.gz download.
     raw2 = tmp_path / "raw2"
-    raw2.mkdir()
+    (raw2 / "splits_txt").mkdir(parents=True)   # a tar's list is not read: it would take a full pass
+    (raw2 / "splits_txt" / "basketball.txt").write_text("v_b1_c001\nv_b2_c001\n")
     import io
     with tarfile.open(raw2 / "sportsmot.tar.gz", "w:gz") as t:
         for k, v in names.items():
             ti = tarfile.TarInfo(k)
             ti.size = len(v)
             t.addfile(ti, io.BytesIO(v))
-    assert sportsmot.basketball_zip(str(raw2), str(tmp_path / "bb2.zip"))["files"] == 6
+    assert sportsmot.basketball_zip(str(raw2), str(tmp_path / "bb2.zip"))["files"] == 4
+
+
+def test_sportsmot_zip_from_drive_tars(tmp_path):
+    """Drive layout: dataset/{train,val,test}.tar with the clip list in a loose splits_txt/ folder
+    next to dataset/. Only train and val are read (test.tar here is not even a valid archive)."""
+    import io, tarfile, zipfile
+    raw = tmp_path / "sportsmot"
+    (raw / "dataset").mkdir(parents=True)
+    (raw / "splits_txt").mkdir()
+    (raw / "splits_txt" / "basketball.txt").write_text("v_b1_c001\nv_b2_c001\n")
+    for split, seqs, prefix in [("train", ["v_b1_c001", "v_f1_c001"], "train/"), ("val", ["v_b2_c001"], "")]:
+        with tarfile.open(raw / "dataset" / f"{split}.tar", "w") as t:   # val.tar: no split folder inside
+            for seq in seqs:
+                for name, data in [("img1/000001.jpg", b"jpg"), ("gt/gt.txt", b"1,1,0,0,1,1,1,1,1\n")]:
+                    ti = tarfile.TarInfo(f"{prefix}{seq}/{name}")
+                    ti.size = len(data)
+                    t.addfile(ti, io.BytesIO(data))
+    (raw / "dataset" / "test.tar").write_bytes(b"not read")
+    assert [a.name for a in sportsmot.archives(raw)] == ["train.tar", "val.tar"]
+    info = sportsmot.basketball_zip(str(raw), str(tmp_path / "bb.zip"))
+    assert info["sequences"] == {"train": 1, "val": 1} and info["files"] == 4
+    assert sportsmot.check_zip(str(tmp_path / "bb.zip"), info["sequences"])
+    assert not sportsmot.check_zip(str(tmp_path / "bb.zip"), {"train": 2})
+    root = sportsmot.unpack(str(tmp_path / "bb.zip"), str(tmp_path / "sm"))
+    assert [s.name for s in sportsmot.basketball_sequences(root, "val")] == ["v_b2_c001"]
+    # Without any list file, the built-in SportsMOT basketball list is used.
+    (raw / "splits_txt" / "basketball.txt").unlink()
+    info = sportsmot.basketball_zip(str(raw), str(tmp_path / "bb2.zip"))
+    assert info["basketball_listed"] == len(sportsmot.BASKETBALL) == 80 and info["files"] == 0
+
+
+def test_threshold_sweep_and_best_threshold():
+    from courtvision.training.evaluate import best_threshold, threshold_sweep
+    gt = np.array([[0, 0, 10, 10], [20, 0, 30, 10]], float)
+    # One image: two players, found at 0.9 and 0.3, plus a false box at 0.2.
+    pred = np.array([[0, 0, 10, 10], [20, 0, 30, 10], [50, 50, 60, 60]], float)
+    preds = [(gt, np.zeros(2, int), pred, np.zeros(3, int), np.array([0.9, 0.3, 0.2]))]
+    sweep = threshold_sweep(preds, DETECT_CLASSES, "Player", [0.1, 0.25, 0.5], beta=2)
+    assert sweep.loc[0.1, "recall"] == 1.0 and sweep.loc[0.1, "precision"] == 0.667
+    assert sweep.loc[0.25, "precision"] == 1.0 and sweep.loc[0.5, "recall"] == 0.5
+    assert best_threshold(sweep, "f2") == 0.25
+    assert best_threshold(sweep, "recall", min_precision=0.9) == 0.25
+
+
+def test_track_players_respects_threshold():
+    from courtvision.detect import DET_COLUMNS
+    from courtvision.training.evaluate import mot_metrics
+    from courtvision.training.tracking_eval import track_players
+    n = 30
+    rows = [(f, "player", 10 + f, 50, 40 + f, 130, 0.9) for f in range(n)]
+    rows += [(f, "player", 200 - f, 60, 230 - f, 140, 0.4) for f in range(n)]
+    dets = pd.DataFrame(rows, columns=DET_COLUMNS)
+    sd = {"dets": dets, "motion": [np.eye(3)] * n, "cuts": [], "frame_ids": list(range(1, n + 1))}
+    gt = {f + 1: {1: [10 + f, 50, 40 + f, 130], 2: [200 - f, 60, 230 - f, 140]} for f in range(n)}
+    low = mot_metrics(gt, track_players(sd, 0.1, 25, 30))
+    high = mot_metrics(gt, track_players(sd, 0.5, 25, 30))
+    assert low["recall"] > 0.9 and high["recall"] < 0.55 and low["idf1"] > high["idf1"]

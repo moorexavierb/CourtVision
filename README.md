@@ -41,8 +41,8 @@ Two YOLO models, trained in Colab (`notebooks/`), weights in `MyDrive/courtvisio
 
 | Model | Notebook | Datasets |
 |---|---|---|
-| `player_detector.pt`: Player, Ref, Ball, Hoop | 01 | your Roboflow set (v17), Basketball Game Detection, Basketball Broadcast, SportsMOT basketball, your own labelled frames |
-| `court_keypoints.pt`: 18 court landmarks | 02 | the public court-keypoint set (reloc2), plus geometry-checked labels on Basketball Game Detection and Basketball Broadcast frames, your own labelled frames |
+| `player_detector.pt`: Player, Ref, Ball, Hoop | 01 (part A) | your Roboflow set (v17), Basketball Game Detection, Basketball Broadcast, SportsMOT basketball, your own labelled frames |
+| `court_keypoints.pt`: 18 court landmarks | 01 (part B) | the public court-keypoint set (reloc2), plus geometry-checked labels on Basketball Game Detection and Basketball Broadcast frames, your own labelled frames |
 
 How leakage between training and scoring is kept out (`courtvision/training/sources.py`):
 
@@ -57,10 +57,12 @@ How leakage between training and scoring is kept out (`courtvision/training/sour
 
 ## Quick start (Colab)
 
-1. `notebooks/01_train_detector.ipynb`: detector, cross-validated across datasets.
-2. `notebooks/02_train_court_keypoints.ipynb`: court keypoint model.
-3. `notebooks/00_end_to_end_colab.ipynb`: run on a clip; shows diagnostics, the 10 Hz table, a top-down replay and the annotated video.
-4. `notebooks/03_collect_frames_to_label.ipynb`: picks the frames of your clips the models get wrong and exports them with pre-labels for Roboflow; corrected, they feed back into 01 and 02.
+1. `notebooks/01_train_models.ipynb`: trains both models in one run, top to bottom. Thresholds
+   are tuned for tracking (player threshold by IDF1 on held-out SportsMOT clips) and saved to
+   `models/tuned_config.yaml`; a model is installed only if it beats the current one; part C
+   shows the pipeline's output on your clips before vs after.
+2. `notebooks/00_end_to_end_colab.ipynb`: run on a clip; shows diagnostics, the 10 Hz table, a top-down replay and the annotated video. Reads `models/tuned_config.yaml` when it exists.
+3. `notebooks/02_collect_frames_to_label.ipynb`: picks the frames of your clips the models get wrong and exports them with pre-labels for Roboflow; corrected, they feed back into 01.
 
 Each notebook has a `BRANCH` setting in its clone cell for testing a pull request. Store the
 Roboflow key in Colab **Secrets** as `ROBOFLOW_API_KEY` (and a Hugging Face token as `HF_TOKEN`

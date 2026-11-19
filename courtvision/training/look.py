@@ -1,4 +1,4 @@
-"""Draw labels on images, to check a dataset by eye before training on it (notebooks 01 and 02).
+"""Draw labels on images, to check a dataset by eye before training on it (notebook 01).
 
 A dataset where some players are not boxed, or a pseudo-label on the wrong landmark, is easiest
 to catch by looking: a grid of nine random images per source is usually enough.

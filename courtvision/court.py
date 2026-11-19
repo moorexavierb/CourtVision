@@ -111,7 +111,7 @@ def orientation(H_img_to_court: np.ndarray, img_pts) -> int:
     in front of the camera). Every real view of a court labelled one way has the same sign; a fit
     to labels with the left and right halves swapped (a mirror image) has the other. Which sign is
     right depends on the dataset's landmark convention, so it is measured on hand-labelled frames
-    (notebook 02) rather than assumed here."""
+    (notebook 01, part B) rather than assumed here."""
     pts = np.asarray(img_pts, dtype=np.float64).reshape(-1, 2)
     w = np.column_stack([pts, np.ones(len(pts))]) @ H_img_to_court[2]
     return int(np.sign(np.linalg.det(H_img_to_court)) * np.sign(np.median(w)))
