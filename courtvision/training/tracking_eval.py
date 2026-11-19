@@ -20,7 +20,8 @@ from ..config import Detection
 def detect_sequence(weights: str, seq: Path, det: Detection, min_conf: float = 0.05) -> dict:
     """Detections (down to min_conf), camera motion and cuts for one SportsMOT sequence."""
     from ..detect import detect_objects
-    paths = sorted((Path(seq) / "img1").glob("*.jpg"))
+    from .sportsmot import frame_paths
+    paths = [p for _, p in sorted(frame_paths(seq).items())]
     frames = lambda: (cv2.imread(str(p)) for p in paths)
     dets = detect_objects(frames(), weights, replace(det, conf=min_conf, ball_conf=min_conf), total=len(paths))
     people = dets[dets.role.isin(["player", "referee"]) & (dets.conf >= det.conf)].groupby("frame")
