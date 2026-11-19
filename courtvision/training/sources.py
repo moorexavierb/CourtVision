@@ -63,7 +63,7 @@ class Source:
 # --------------------------------------------------------------------------- files
 
 def images_in(folder: Path) -> list[Path]:
-    return sorted(p for p in Path(folder).glob("*") if p.suffix.lower() in IMAGE_EXTS)
+    return sorted(p for p in Path(folder).glob("*") if p.suffix.lower() in IMAGE_EXTS and not p.name.startswith("."))
 
 
 def label_for(image: Path) -> Path:

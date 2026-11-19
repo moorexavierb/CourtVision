@@ -100,8 +100,16 @@ def player_boxes(seq: Path) -> dict[int, np.ndarray]:
     return {f: np.array(list(b.values()), float) for f, b in read_tracks(seq).items()}
 
 
+def hidden(name: str) -> bool:
+    """macOS metadata that tars made on a Mac carry: ._000001.jpg next to 000001.jpg, __MACOSX/,
+    .DS_Store. Not images; skipped everywhere."""
+    parts = PurePosixPath(name).parts
+    return "__MACOSX" in parts or any(p.startswith("._") or p == ".DS_Store" for p in parts)
+
+
 def frame_paths(seq: Path) -> dict[int, Path]:
-    return {int(p.stem): p for p in (Path(seq) / "img1").glob("*.jpg")}
+    """{frame number: image path} of a sequence (000001.jpg -> 1)."""
+    return {int(p.stem): p for p in (Path(seq) / "img1").glob("*.jpg") if p.stem.isdigit()}
 
 
 def seq_fps(seq: Path, default: float = 25.0) -> float:
@@ -177,7 +185,7 @@ def _archive_files(path: Path):
 
 def _dir_files(root: Path):
     for p in sorted(Path(root).rglob("*")):
-        if p.is_file() and not p.name.endswith(ARCHIVE_EXTS):
+        if p.is_file() and not p.name.endswith(ARCHIVE_EXTS) and not hidden(p.name):
             with open(p, "rb") as f:
                 yield p.relative_to(root).as_posix(), f
 
@@ -202,6 +210,8 @@ def _target(name: str, keep: set[str], splits, archive_split: Optional[str]) -> 
     """Where a file of the download goes in the basketball zip (split/sequence/...), or None.
     The split comes from the path (.../train/<seq>/...) or, when the path has none, from the
     archive's name (train.tar holding <seq>/img1/...)."""
+    if hidden(name):
+        return None
     parts = [x for x in PurePosixPath(name).parts if x not in (".", "")]
     for i, part in enumerate(parts[:-1]):
         if part in keep:

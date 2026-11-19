@@ -1,4 +1,6 @@
 """Training data: leakage-free multi-dataset build, cross-validation folds, labels, crops, scores."""
+from pathlib import Path
+
 import cv2
 import numpy as np
 import pandas as pd
@@ -251,7 +253,8 @@ def test_sportsmot_zip_from_drive_tars(tmp_path):
     for split, seqs, prefix in [("train", ["v_b1_c001", "v_f1_c001"], "train/"), ("val", ["v_b2_c001"], "")]:
         with tarfile.open(raw / "dataset" / f"{split}.tar", "w") as t:   # val.tar: no split folder inside
             for seq in seqs:
-                for name, data in [("img1/000001.jpg", b"jpg"), ("gt/gt.txt", b"1,1,0,0,1,1,1,1,1\n")]:
+                for name, data in [("img1/000001.jpg", b"jpg"), ("img1/._000001.jpg", b"mac"),
+                                   ("gt/gt.txt", b"1,1,0,0,1,1,1,1,1\n")]:
                     ti = tarfile.TarInfo(f"{prefix}{seq}/{name}")
                     ti.size = len(data)
                     t.addfile(ti, io.BytesIO(data))
@@ -261,8 +264,12 @@ def test_sportsmot_zip_from_drive_tars(tmp_path):
     assert info["sequences"] == {"train": 1, "val": 1} and info["files"] == 4
     assert sportsmot.check_zip(str(tmp_path / "bb.zip"), info["sequences"])
     assert not sportsmot.check_zip(str(tmp_path / "bb.zip"), {"train": 2})
+    assert not any("._" in n for n in zipfile.ZipFile(tmp_path / "bb.zip").namelist())   # macOS metadata left out
     root = sportsmot.unpack(str(tmp_path / "bb.zip"), str(tmp_path / "sm"))
     assert [s.name for s in sportsmot.basketball_sequences(root, "val")] == ["v_b2_c001"]
+    # A zip made before that fix still holds ._ files: frame_paths skips them.
+    (Path(root) / "val" / "v_b2_c001" / "img1" / "._000001.jpg").write_bytes(b"mac")
+    assert list(sportsmot.frame_paths(Path(root) / "val" / "v_b2_c001")) == [1]
     # Without any list file, the built-in SportsMOT basketball list is used.
     (raw / "splits_txt" / "basketball.txt").unlink()
     info = sportsmot.basketball_zip(str(raw), str(tmp_path / "bb2.zip"))
