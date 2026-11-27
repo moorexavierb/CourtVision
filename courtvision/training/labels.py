@@ -15,6 +15,7 @@ too few keypoints itself.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -65,6 +66,78 @@ def fill_missing(gt_xyxy, gt_cls, pred_xyxy, pred_cls, pred_conf, fill_classes: 
     if keep.any() and len(gt_xyxy):
         keep &= ~(iou_matrix(pred_xyxy, gt_xyxy).max(axis=1) > max_iou_with_gt)
     return np.vstack([gt_xyxy, pred_xyxy[keep]]), np.concatenate([gt_cls, pred_cls[keep]])
+
+
+def labelled_classes(root: str | Path, names: list[str], rename: Optional[dict] = None) -> dict[str, int]:
+    """{our class: boxes} a YOLO dataset labels itself, over all its splits (after renaming)."""
+    from .sources import SPLITS, class_map, class_names
+    root = Path(root)
+    cmap = class_map(class_names(root / "data.yaml"), names, rename)
+    counts = {n: 0 for n in names}
+    for split in SPLITS:
+        for lbl in (root / split / "labels").glob("*.txt") if (root / split / "labels").exists() else []:
+            for line in open(lbl):
+                parts = line.split()
+                try:
+                    c = int(float(parts[0])) if parts else -1
+                except ValueError:
+                    continue
+                if c in cmap:
+                    counts[names[cmap[c]]] += 1
+    return counts
+
+
+def fill_dataset(root: str | Path, out: str | Path, names: list[str], fill: list[str], predict,
+                 rename: Optional[dict] = None, keep_conf: float = 0.5, low_conf: float = 0.15) -> dict:
+    """A copy of a YOLO dataset (all splits, our class ids) with the classes in `fill` added from a
+    model's confident boxes, as SportsMOT's referees and balls are (fill_missing).
+
+    Ultralytics' training tips: "all instances of all classes in all images must be labelled.
+    Partial labelling will not work" (docs.ultralytics.com/yolov5/tutorials/tips_for_best_training_results).
+    A broadcast dataset that boxes players but not referees would teach the merged model that
+    referees are background. Filling missing classes from a model trained on the full label set is
+    the pseudo-labelling of Zhao et al., "Object Detection with a Unified Label Space from Multiple
+    Datasets", ECCV 2020. predict(image BGR) -> (xyxy, our class ids, conf). Frames where the model
+    is unsure about a filled class are left out. Returns counts."""
+    import shutil
+    import cv2
+    import yaml
+    from .sources import SPLITS, class_map, class_names, clean_label, images_in, label_for
+    root, out = Path(root), Path(out)
+    src_names = class_names(root / "data.yaml")
+    cmap = class_map(src_names, names, rename)
+    fill_ids = [names.index(c) for c in fill]
+    shutil.rmtree(out, ignore_errors=True)
+    counts = {"images": 0, "skipped_unsure": 0, "unreadable": 0, "boxes_added": 0}
+    for split in SPLITS:
+        if not (root / split / "images").exists():
+            continue
+        (out / split / "images").mkdir(parents=True)
+        (out / split / "labels").mkdir(parents=True)
+        for img_path in images_in(root / split / "images"):
+            img = cv2.imread(str(img_path))
+            if img is None:
+                counts["unreadable"] += 1
+                continue
+            H, W = img.shape[:2]
+            lbl = label_for(img_path)
+            rows, _ = clean_label(open(lbl) if lbl.exists() else [], cmap, len(src_names))
+            gt = np.array([[float(v) for v in r.split()[1:5]] for r in rows], float).reshape(-1, 4)
+            gt_xyxy = np.column_stack([(gt[:, 0] - gt[:, 2] / 2) * W, (gt[:, 1] - gt[:, 3] / 2) * H,
+                                       (gt[:, 0] + gt[:, 2] / 2) * W, (gt[:, 1] + gt[:, 3] / 2) * H])
+            gt_cls = np.array([int(r.split()[0]) for r in rows], int)
+            p_xyxy, p_cls, p_conf = predict(img)
+            filled = fill_missing(gt_xyxy, gt_cls, p_xyxy, p_cls, p_conf, fill_ids, keep_conf, low_conf)
+            if filled is None:
+                counts["skipped_unsure"] += 1
+                continue
+            counts["boxes_added"] += len(filled[1]) - len(gt_cls)
+            shutil.copy(img_path, out / split / "images" / img_path.name)
+            new_rows = box_rows(*filled, (W, H))
+            (out / split / "labels" / f"{img_path.stem}.txt").write_text("\n".join(new_rows) + ("\n" if new_rows else ""))
+            counts["images"] += 1
+    yaml.safe_dump({"names": {i: n for i, n in enumerate(names)}}, open(out / "data.yaml", "w"))
+    return counts
 
 
 def court_row_from_h(H: np.ndarray, court: CourtSpec, size: tuple[int, int], min_visible: int = 4,

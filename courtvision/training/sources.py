@@ -24,6 +24,24 @@ Layout written to ``out``:
     folds/kfold_<i>.yaml                         grouped k-fold (kfold_folds)
 
 Works for detection (labels "cls cx cy w h") and court keypoints (pose rows, kpt_shape [18, 3]).
+
+Every image and label is checked on the way in, the way Ultralytics' own dataset check does
+(``ultralytics/data/utils.py: verify_image_label``), but before the split rather than at training
+time, so a bad file can neither crash a run nor slip into a split unnoticed:
+
+* images that do not open, are under 10 px, or are truncated JPEGs (re-saved, as Ultralytics does);
+* label rows that are not numbers, have a class id the source does not define, are polygons
+  (turned into their bounding box), lie outside the image (clipped), have no area, or repeat;
+* pose rows with the wrong number of values for ``kpt_shape``;
+* a source whose class names leave a *person* class unmapped (e.g. ``team_a``) raises, because
+  those players would be trained on as background; other unknown classes (scoreboard, clock) are
+  dropped and listed in ``manifest.attrs["classes"]``;
+* images without a label file in a labelled source are left out (unknown, not background);
+* background images (negatives and empty labels) are capped at ``max_background`` of training
+  images, following Ultralytics' tip of 0-10% background images
+  (https://docs.ultralytics.com/yolov5/tutorials/tips_for_best_training_results/).
+
+``manifest.attrs["checks"]`` counts everything that was fixed or dropped, per source.
 """
 from __future__ import annotations
 
@@ -42,10 +60,14 @@ SPLITS = ("train", "valid", "test")
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 DETECT_CLASSES = ["Player", "Ref", "Ball", "Hoop"]
 # Class names other datasets use for ours (lower case). Anything else is dropped.
-SYNONYMS = {"player": "Player", "players": "Player", "ref": "Ref", "referee": "Ref", "referees": "Ref",
+SYNONYMS = {"player": "Player", "players": "Player", "basketball player": "Player", "basketball-player": "Player",
+            "basketball_player": "Player", "ref": "Ref", "referee": "Ref", "referees": "Ref",
             "ball": "Ball", "basketball": "Ball", "sports ball": "Ball", "hoop": "Hoop", "basket": "Hoop",
             "rim": "Hoop", "court": "court"}
 
+# Class names that mean a person on the court. Left unmapped, those boxes would be dropped and the
+# people in them trained on as background, so build() refuses (map or drop them with rename).
+_PERSON_LIKE = re.compile(r"player|person|people|team|ref|athlete|offen|defen|guard|forward|center|home|away", re.I)
 _RF_SUFFIX = re.compile(r"(_(jpg|jpeg|png|webp|bmp))?\.rf\.[0-9a-f]{16,}$", re.I)
 _FRAME_SUFFIX = re.compile(r"[_\-. ]?(frame|frm|img|image|f)?[_\-. ]?\d+$", re.I)
 
@@ -91,6 +113,126 @@ def class_map(src_names: list[str], names: list[str], rename: Optional[dict] = N
         target = (rename or {}).get(n, SYNONYMS.get(n.lower(), n))
         if target is not None and target in names:
             out[i] = names.index(target)
+    return out
+
+
+# --------------------------------------------------------------------------- checks
+
+def check_image(path: Path, fix: bool = True) -> tuple[Optional[tuple[int, int]], str]:
+    """((width, height) or None, note). Mirrors Ultralytics' verify_image_label: the image must
+    open, be at least 10 px each way, and a JPEG must end with its end-of-image marker; a
+    truncated JPEG is re-saved in place (fix) so training reads it the same way every epoch."""
+    from PIL import Image, ImageFile, ImageOps
+    try:
+        with Image.open(path) as im:
+            im.verify()
+        with Image.open(path) as im:
+            size = im.size
+            if im.getexif().get(0x0112, 1) in (5, 6, 7, 8):  # EXIF orientation: rotated 90 degrees
+                size = size[::-1]
+    except Exception as e:  # PIL raises many types for corrupt files
+        return None, f"unreadable ({type(e).__name__})"
+    if min(size) < 10:
+        return None, "smaller than 10 px"
+    if Path(path).suffix.lower() in (".jpg", ".jpeg"):
+        with open(path, "rb") as f:
+            f.seek(-2, 2)
+            if f.read() != b"\xff\xd9":
+                if not fix:
+                    return size, "truncated jpeg"
+                old, ImageFile.LOAD_TRUNCATED_IMAGES = ImageFile.LOAD_TRUNCATED_IMAGES, True
+                try:
+                    with Image.open(path) as im:
+                        fixed = ImageOps.exif_transpose(im).convert("RGB")
+                    fixed.save(path, "JPEG", subsampling=0, quality=100)
+                except Exception as e:
+                    return None, f"truncated jpeg, not repairable ({type(e).__name__})"
+                finally:
+                    ImageFile.LOAD_TRUNCATED_IMAGES = old
+                return size, "truncated jpeg (repaired)"
+    return size, "ok"
+
+
+def clean_label(lines, cmap: dict[int, int], n_src_classes: int, kpt_shape: Optional[list[int]] = None
+                ) -> tuple[list[str], dict]:
+    """YOLO rows in our class ids, cleaned; and counts of what was changed or dropped.
+
+    Detection rows: a polygon row (cls x1 y1 x2 y2 ...; Roboflow exports one when a project mixes
+    boxes and masks) becomes its bounding box; boxes are clipped to the image; rows with no area,
+    bad numbers, unknown class ids or exact repeats are dropped. Pose rows must have
+    5 + kpt * dims values; 2-value keypoints get visibility 2 (Ultralytics' convention for "visible")."""
+    notes = {k: 0 for k in ["bad_rows", "unknown_class", "polygon_to_box", "clipped", "no_area", "duplicates",
+                            "wrong_keypoint_count", "dropped_class"]}
+    out, seen = [], set()
+    nk, dims = (kpt_shape or [0, 3])[:2]
+    for line in lines:
+        parts = line.split()
+        if not parts:
+            continue
+        try:
+            vals = [float(v) for v in parts]
+        except ValueError:
+            notes["bad_rows"] += 1
+            continue
+        if any(v != v or abs(v) == float("inf") for v in vals) or vals[0] != int(vals[0]):
+            notes["bad_rows"] += 1
+            continue
+        c = int(vals[0])
+        if not 0 <= c < n_src_classes:
+            notes["unknown_class"] += 1
+            continue
+        if c not in cmap:
+            notes["dropped_class"] += 1
+            continue
+        if kpt_shape:
+            k = vals[5:]
+            if len(k) == nk * 2 and dims == 3:
+                k = [v for i in range(nk) for v in (k[2 * i], k[2 * i + 1], 2.0)]
+            if len(k) != nk * dims:
+                notes["wrong_keypoint_count"] += 1
+                continue
+            box = vals[1:5]
+        elif len(vals) == 5:
+            box = vals[1:5]
+        elif len(vals) >= 7 and len(vals) % 2 == 1:
+            xs, ys = vals[1::2], vals[2::2]
+            x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+            box, k = [(x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0], []
+            notes["polygon_to_box"] += 1
+        else:
+            notes["bad_rows"] += 1
+            continue
+        cx, cy, w, h = box
+        x0, y0, x1, y1 = cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2
+        cx0, cy0, cx1, cy1 = (min(max(v, 0.0), 1.0) for v in (x0, y0, x1, y1))
+        if (cx0, cy0, cx1, cy1) != (x0, y0, x1, y1):
+            notes["clipped"] += 1
+        if cx1 - cx0 <= 1e-4 or cy1 - cy0 <= 1e-4:
+            notes["no_area"] += 1
+            continue
+        row = [str(cmap[c])] + [f"{v:.6f}" for v in ((cx0 + cx1) / 2, (cy0 + cy1) / 2, cx1 - cx0, cy1 - cy0)]
+        if kpt_shape:
+            row += [f"{v:.6g}" for v in k]
+        row = " ".join(row)
+        if row in seen:
+            notes["duplicates"] += 1
+            continue
+        seen.add(row)
+        out.append(row)
+    return out, notes
+
+
+def class_report(src_names: list[str], cmap: dict[int, int], names: list[str], rename: Optional[dict] = None
+                 ) -> dict[str, Optional[str]]:
+    """{source class name: our class or None (dropped)}. Raises when a person-like class is left
+    unmapped without being dropped on purpose (rename={name: None})."""
+    out = {n: (names[cmap[i]] if i in cmap else None) for i, n in enumerate(src_names)}
+    explicit = set((rename or {}).keys())
+    risky = [n for n, t in out.items() if t is None and n not in explicit and _PERSON_LIKE.search(n)]
+    if risky:
+        raise ValueError(f"classes {risky} look like people on the court but map to none of {names}. "
+                         f"Their boxes would be dropped and those people trained on as background. Pass "
+                         f"Source(rename={{{risky[0]!r}: 'Player'}}) (or None to drop it on purpose).")
     return out
 
 
@@ -155,11 +297,15 @@ _POPCOUNT = np.array([bin(i).count("1") for i in range(256)], np.uint8)
 def near_duplicate_pairs(hashes: np.ndarray, max_bits: int = 6, chunk: int = 256) -> list[tuple[int, int]]:
     """Index pairs (i < j) whose hashes differ in at most max_bits bits."""
     b = np.asarray(hashes, dtype=np.uint64).view(np.uint8).reshape(-1, 8)
+    # A flat image (black frame, blank card, unreadable file) hashes to almost all 0s or 1s and
+    # would tie every other flat image together, across datasets, into one huge component.
+    ones = _POPCOUNT[b].sum(axis=1, dtype=np.int32)
+    flat = (ones <= max_bits) | (ones >= 64 - max_bits)
     pairs = []
     for s in range(0, len(b), chunk):
         dist = _POPCOUNT[np.bitwise_xor(b[s:s + chunk, None, :], b[None, :, :])].sum(axis=2, dtype=np.int32)
         for i, j in zip(*np.nonzero(dist <= max_bits)):
-            if s + i < j:
+            if s + i < j and not flat[s + i] and not flat[j]:
                 pairs.append((int(s + i), int(j)))
     return pairs
 
@@ -226,48 +372,86 @@ def split_components(manifest: pd.DataFrame, val_frac: float, test_frac: float, 
 
 def build(sources: list[Source], names: list[str], out: str, val_frac: float = 0.15, test_frac: float = 0.15,
           seed: int = 0, near_dup_bits: int = 6, kpt_shape: Optional[list[int]] = None,
-          flip_idx: Optional[list[int]] = None) -> pd.DataFrame:
-    """Copy every source into `out` with our class ids, tie and split, write lists and yamls.
-    Returns the manifest. For court keypoints pass kpt_shape=[18, 3] and flip_idx."""
+          flip_idx: Optional[list[int]] = None, max_background: float = 0.1) -> pd.DataFrame:
+    """Copy every source into `out` with our class ids, check, tie and split, write lists and yamls.
+    Returns the manifest. For court keypoints pass kpt_shape=[18, 3] and flip_idx.
+    max_background: background images (negatives, empty labels) allowed as a share of the
+    training images; the rest are left out of training (split "unused"). None keeps all."""
     out_root = Path(out)
     shutil.rmtree(out_root, ignore_errors=True)
-    rows = []
+    rows, checks, classes = [], {}, {}
     for src in sources:
         if not re.fullmatch(r"[A-Za-z0-9_\-]+", src.name):
             raise ValueError(f"source name '{src.name}': use letters, digits, - or _")
         items = source_images(src)
-        cmap = {} if src.role == "negatives" else class_map(class_names(Path(src.root) / "data.yaml"), names, src.rename)
+        if src.role != "negatives":
+            data_yaml = Path(src.root) / "data.yaml"
+            if not data_yaml.exists():
+                raise FileNotFoundError(f"{src.name}: no data.yaml in {src.root}")
+            src_names = class_names(data_yaml)
+            cmap = class_map(src_names, names, src.rename)
+            classes[src.name] = class_report(src_names, cmap, names, src.rename)
+        else:
+            src_names, cmap = [], {}
+        note = {"images": len(items), "unreadable": 0, "repaired_jpeg": 0, "no_label_file": 0, "empty_label": 0}
         groups = assign_groups([img.stem for img, _ in items], src.group_by)
         (out_root / "images" / src.name).mkdir(parents=True, exist_ok=True)
         (out_root / "labels" / src.name).mkdir(parents=True, exist_ok=True)
         used = set()
         for (img, lbl), group in zip(items, groups):
+            size, why = check_image(img)
+            if size is None:
+                note["unreadable"] += 1
+                continue
+            note["repaired_jpeg"] += why.endswith("(repaired)")
+            if lbl is not None and not lbl.exists():
+                note["no_label_file"] += 1
+                continue
             stem = img.stem
             while stem in used:  # same file name in two of the source's splits
                 stem += "_"
             used.add(stem)
+            lines, fixes = clean_label(open(lbl) if lbl is not None else [], cmap, len(src_names), kpt_shape)
+            for k, v in fixes.items():
+                note[k] = note.get(k, 0) + v
             counts = {n: 0 for n in names}
-            lines = []
-            if lbl is not None and lbl.exists():
-                for line in open(lbl):
-                    parts = line.split()
-                    if parts and int(parts[0]) in cmap:
-                        cls = cmap[int(parts[0])]
-                        counts[names[cls]] += 1
-                        lines.append(" ".join([str(cls)] + parts[1:]))
+            for line in lines:
+                counts[names[int(line.split()[0])]] += 1
+            note["empty_label"] += not lines and src.role != "negatives"
             dst = out_root / "images" / src.name / (stem + img.suffix.lower())
             shutil.copy(img, dst)
             (out_root / "labels" / src.name / f"{stem}.txt").write_text("\n".join(lines) + ("\n" if lines else ""))
             rows.append({"image": str(dst), "source": src.name, "role": src.role, "weight": src.weight,
-                         "group": f"{src.name}/{group}", **counts})
+                         "group": f"{src.name}/{group}", "width": size[0], "height": size[1],
+                         "background": not lines, **counts})
+        checks[src.name] = {k: v for k, v in note.items() if v or k == "images"}
     m = pd.DataFrame(rows)
+    if m.empty:
+        raise ValueError("no usable images in any source: " + str(checks))
     pairs = near_duplicate_pairs(np.array([dhash(p) for p in m.image], dtype=np.uint64), near_dup_bits) if near_dup_bits >= 0 else []
     m["component"] = components(m.group.tolist(), pairs)
     m["split"] = split_components(m, val_frac, test_frac, seed)
-    m.attrs["near_duplicate_pairs"] = len(pairs)
+    if max_background is not None:
+        m["split"] = cap_background(m, max_background, seed)
+    m.attrs.update(near_duplicate_pairs=len(pairs), checks=checks, classes=classes)
     m.to_csv(out_root / "manifest.csv", index=False)
     write_lists(m, names, out_root, kpt_shape, flip_idx)
+    (out_root / "checks.yaml").write_text(yaml.safe_dump({"checks": checks, "classes": classes}, sort_keys=False))
     return m
+
+
+def cap_background(m: pd.DataFrame, max_share: float, seed: int = 0) -> pd.Series:
+    """Splits with background training images beyond max_share of all training images marked
+    "unused". Labelled sources' empty frames are kept before negatives (they are in-domain)."""
+    split = m.split.copy()
+    train = m.split == "train"
+    bg = m[train & m.background]
+    allowed = int(max_share * (train & ~m.background).sum() / max(1 - max_share, 1e-9))
+    if len(bg) <= allowed:
+        return split
+    order = bg.assign(r=np.random.default_rng(seed).random(len(bg)), neg=bg.role == "negatives").sort_values(["neg", "r"])
+    split[order.index[allowed:]] = "unused"
+    return split
 
 
 def _write_list(path: Path, images) -> str:
@@ -310,11 +494,23 @@ def write_lists(m: pd.DataFrame, names: list[str], root: Path, kpt_shape=None, f
     (root / "build.yaml").write_text(yaml.safe_dump({"names": names, "kpt_shape": kpt_shape, "flip_idx": flip_idx}))
 
 
+def resolution_report(m: pd.DataFrame, imgsz: int) -> pd.DataFrame:
+    """Median image size per source, and the share smaller than imgsz on the long side. Ultralytics
+    letterboxes every image to imgsz, so a source exported at 640 is upscaled 2x at imgsz=1280: its
+    balls and players look twice as big as in real 1280 frames (Roboflow's default 'Resize 640'
+    export step does this)."""
+    long_side = m[["width", "height"]].max(axis=1)
+    return pd.DataFrame({"median_width": m.groupby("source").width.median(),
+                         "median_height": m.groupby("source").height.median(),
+                         "upscaled_share": (long_side < imgsz).groupby(m.source).mean().round(3)})
+
+
 def leakage_report(m: pd.DataFrame) -> dict:
     """The first three should be zero: components or groups split across splits, images of test
     sources outside test. The rest are for reading: how many images were tied to an image of
     another dataset, and the largest component's share of its source (a big share means many
     frames look alike, and that source's splits are coarse)."""
+    m = m.assign(split=m.split.replace("unused", "train"))  # background left out of training is still train-side
     comp_sources = m.groupby("component").source.nunique()
     biggest = m.groupby(["source", "component"]).size().groupby("source").max() / m.groupby("source").size()
     return {"components_in_two_splits": int((m.groupby("component").split.nunique() > 1).sum()),
@@ -327,6 +523,8 @@ def leakage_report(m: pd.DataFrame) -> dict:
 def summary(m: pd.DataFrame, names: list[str]) -> pd.DataFrame:
     """Images and labels per class, for each source and split."""
     agg = {"image": "count", **{n: "sum" for n in names if n in m}}
+    if "background" in m:
+        agg["background"] = "sum"
     return m.groupby(["source", "split"]).agg(agg).rename(columns={"image": "images"})
 
 

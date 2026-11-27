@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from typing import Optional
 
 import cv2
 import pandas as pd
@@ -42,8 +43,46 @@ def track_players(seq_dets: dict, conf: float, fps: float, track_buffer: int) ->
             for f, g in players.groupby("frame")}
 
 
+def ultralytics_tracks(weights: str, seq: Path, tracker: str = "botsort.yaml", conf: float = 0.1,
+                       imgsz: int = 1280, track_buffer: Optional[int] = None, fps: Optional[float] = None,
+                       player_names=("player",)) -> dict[int, dict[int, list[float]]]:
+    """{frame id: {track id: box}} from Ultralytics' own trackers on one sequence, players only.
+
+    A reference for the pipeline's tracker: "botsort.yaml" is BoT-SORT (Aharon et al. 2022) with
+    sparse optical-flow camera-motion compensation, "bytetrack.yaml" is ByteTrack (Zhang et al.,
+    ECCV 2022), both as shipped with Ultralytics (docs.ultralytics.com/modes/track). conf is the
+    detector's floor; the tracker's own high/low thresholds then apply. track_buffer and fps, when
+    given, override the yaml so all trackers keep lost players for the same time."""
+    import tempfile
+    import yaml
+    from ultralytics import YOLO
+    from ultralytics.utils import ROOT
+    from .sportsmot import frame_paths, seq_fps
+    cfg_path = Path(tracker)
+    if not cfg_path.exists():
+        cfg_path = Path(ROOT) / "cfg" / "trackers" / tracker
+    t_cfg = yaml.safe_load(open(cfg_path))
+    if track_buffer is not None:
+        # Frames a lost track is kept: supervision's ByteTrack (the pipeline) keeps it
+        # track_buffer * fps / 30 frames; Ultralytics runs its trackers at frame_rate=30, i.e. track_buffer frames.
+        t_cfg["track_buffer"] = max(1, int(round(track_buffer * (fps or seq_fps(seq)) / 30)))
+    tmp = Path(tempfile.mkdtemp()) / Path(tracker).name
+    yaml.safe_dump(t_cfg, open(tmp, "w"))
+    model = YOLO(weights)
+    classes = [i for i, n in model.names.items() if n.lower() in player_names]
+    out = {}
+    for fid, p in sorted(frame_paths(seq).items()):
+        img = cv2.imread(str(p))
+        if img is None:
+            continue
+        r = model.track(img, persist=True, tracker=str(tmp), conf=conf, imgsz=imgsz, classes=classes, verbose=False)[0]
+        if r.boxes is not None and r.boxes.id is not None:
+            out[fid] = {int(i): b.tolist() for i, b in zip(r.boxes.id.cpu().numpy(), r.boxes.xyxy.cpu().numpy())}
+    return out
+
+
 def tracking_sweep(per_seq: dict[str, tuple[dict, dict, float]], grid, track_buffer: int) -> pd.DataFrame:
-    """Overall MOTA / IDF1 (box-weighted over sequences) at each player threshold.
+    """Overall HOTA / MOTA / IDF1 (TrackEval's combination over sequences) at each player threshold.
     per_seq: {name: (seq_dets, ground-truth tracks, fps)}."""
     from .evaluate import mot_metrics, mot_table
     rows = {}

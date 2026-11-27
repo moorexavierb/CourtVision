@@ -114,11 +114,13 @@ as good as the ones before it.
 
 | Module | |
 |---|---|
-| `sources.py` | builds one dataset from several (`build`), with leakage checks, leave-one-dataset-out (`lodo_folds`) and grouped k-fold (`kfold_folds`) |
+| `sources.py` | builds one dataset from several (`build`): image and label checks, class-name mapping with a guard for unmapped person classes, background cap, leakage checks, leave-one-dataset-out (`lodo_folds`) and grouped k-fold (`kfold_folds`) |
 | `sportsmot.py` | basketball-only SportsMOT zip from the 23 GB download; frames to YOLO, named by game |
-| `labels.py` | YOLO rows; missing classes filled from a model; geometry-checked court labels |
+| `labels.py` | YOLO rows; missing classes filled from a model (per frame, or a whole dataset with `fill_dataset`); geometry-checked court labels |
 | `crops.py` | zoomed half-court crops of full-court keypoint labels |
-| `evaluate.py` | per-frame detector scores, MOTA and IDF1, court mapping coverage and PCK, new vs current |
+| `evaluate.py` | per-frame detector scores, HOTA / MOTA / IDF1 through TrackEval, court mapping coverage and PCK, new vs current |
+| `tracking_eval.py` | detector + pipeline tracker on labelled sequences, threshold sweeps; Ultralytics BoT-SORT / ByteTrack for comparison |
+| `clip_eval.py` | the real pipeline on game clips: scored against SportsMOT tracks (overlay video, ID timeline, per-box table) or, on your clips, sanity checks (players per team, speeds, jumps, duplicate ids) |
 | `mining.py` | which frames of your own clips are worth labelling |
 | `look.py` | label grids, to check a dataset by eye |
 
@@ -132,6 +134,14 @@ Leakage rules in `build`:
   trains, so one video can't be most of a test split);
 * `role="test"` sources (clips kept back) pull every component they touch into test;
 * `leakage_report` must show zeros, and also reports how many images were tied across datasets.
+
+Input checks in `build` (counted per source in `checks.yaml`): unreadable or tiny images are left
+out and truncated JPEGs re-saved (as Ultralytics' `verify_image_label` does); label rows are
+cleaned (polygons to boxes, clipped to the image, no-area / bad / repeated rows dropped, pose rows
+checked against `kpt_shape`); an image with no label file is left out, an empty one is background;
+background images are capped at 10% of training images; a class name that looks like a person but
+maps to none of ours (`team_a`) stops the build. Flat images (black frames) are never tied as
+near-duplicates.
 
 Scoring rules in the notebooks: each source is scored only on the classes it labels itself
 (SportsMOT's referee, ball and hoop boxes, and the court pseudo-labels, came from the current

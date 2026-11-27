@@ -7,8 +7,14 @@ landmarks to map the frame. So besides Ultralytics' mAP, models are scored on:
 * detector: per-frame player recall (players found / players labelled, averaged over frames) and
   the share of frames where every labelled player was found; ball precision and recall; the share
   of frames with a phantom ball;
-* tracking (sequences with track ids, e.g. SportsMOT val): MOTA and IDF1, because a court
-  position is only useful if it stays attached to one player;
+* tracking (sequences with track ids, e.g. SportsMOT val): HOTA, MOTA and IDF1, because a court
+  position is only useful if it stays attached to one player. These come from TrackEval
+  (github.com/JonathonLuiten/TrackEval), the reference code of MOTChallenge and of the SportsMOT
+  benchmark (Cui et al., ICCV 2023), so the numbers are comparable to published ones. HOTA
+  (Luiten et al., IJCV 2021) is the mean over IoU thresholds 0.05-0.95 of sqrt(DetA * AssA):
+  detection and association weighed equally; MOTA (Bernardin & Stiefelhagen 2008) is dominated by
+  detection; IDF1 (Ristani et al. 2016) by identity. Without TrackEval installed, a simpler
+  in-house MOTA/IDF1 is used and HOTA is left empty;
 * court model: share of frames that get a usable homography, landmarks per frame, and, where
   labels exist, landmark error in pixels and PCK (share within 2% of the image width).
 
@@ -175,18 +181,71 @@ def best_threshold(sweep: pd.DataFrame, metric: str, min_precision: float = 0.0)
 
 # ----------------------------------------------------------------- tracking
 
-def mot_metrics(gt: dict[int, dict[int, list[float]]], pred: dict[int, dict[int, list[float]]],
-                iou_thr: float = 0.5) -> dict:
-    """CLEAR-MOT MOTA, identity switches and IDF1 for one sequence.
-
-    gt, pred: {frame: {track id: [x0, y0, x1, y1]}}. MOTA = 1 - (misses + false positives +
-    id switches) / ground-truth boxes. IDF1 is the F1 of boxes matched under the best
-    one-to-one mapping between ground-truth and predicted identities over the whole sequence,
-    so it drops whenever a player's track changes id or swaps with another player.
-    """
+def _trackeval_data(gt: dict, pred: dict) -> dict:
+    """The per-sequence dict TrackEval's metrics read (what MotChallenge2DBox.get_preprocessed_seq_data
+    builds from files): ids made contiguous, IoU similarity per frame."""
     frames = sorted(set(gt) | set(pred))
+    g_ids = {g: k for k, g in enumerate(sorted({i for v in gt.values() for i in v}))}
+    p_ids = {p: k for k, p in enumerate(sorted({i for v in pred.values() for i in v}))}
+    data = {"gt_ids": [], "tracker_ids": [], "similarity_scores": [], "num_timesteps": len(frames),
+            "num_gt_ids": len(g_ids), "num_tracker_ids": len(p_ids), "num_gt_dets": 0, "num_tracker_dets": 0}
+    for f in frames:
+        g, p = gt.get(f, {}), pred.get(f, {})
+        data["gt_ids"].append(np.array([g_ids[i] for i in g], int))
+        data["tracker_ids"].append(np.array([p_ids[i] for i in p], int))
+        data["similarity_scores"].append(iou_matrix(np.array(list(g.values()), float), np.array(list(p.values()), float)))
+        data["num_gt_dets"] += len(g)
+        data["num_tracker_dets"] += len(p)
+    return data
+
+
+def _trackeval():
+    try:
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            from trackeval.metrics import CLEAR, HOTA, Identity
+            return {"HOTA": HOTA(), "CLEAR": CLEAR({"THRESHOLD": 0.5, "PRINT_CONFIG": False}),
+                    "Identity": Identity({"THRESHOLD": 0.5, "PRINT_CONFIG": False})}
+    except Exception:
+        return None
+
+
+def _from_trackeval(raw: dict) -> dict:
+    h, c, i = raw["HOTA"], raw["CLEAR"], raw["Identity"]
+    r = lambda v: round(float(np.mean(v)), 3)
+    return {"hota": r(h["HOTA"]), "deta": r(h["DetA"]), "assa": r(h["AssA"]), "loca": r(h["LocA"]),
+            "mota": r(c["MOTA"]), "idf1": r(i["IDF1"]), "id_switches": int(c["IDSW"]), "fragmentations": int(c["Frag"]),
+            "mostly_tracked": int(c["MT"]), "mostly_lost": int(c["ML"]),
+            "recall": r(c["CLR_Re"]), "precision": r(c["CLR_Pr"])}
+
+
+def mot_metrics(gt: dict[int, dict[int, list[float]]], pred: dict[int, dict[int, list[float]]],
+                iou_thr: float = 0.5, backend: str = "auto") -> dict:
+    """HOTA, MOTA, IDF1 and friends for one sequence. gt, pred: {frame: {track id: [x0, y0, x1, y1]}}.
+
+    backend "trackeval" (the default when installed) runs TrackEval's HOTA, CLEAR and Identity
+    metrics; "simple" is the in-house version below (MOTA, IDF1, no HOTA), kept as a fallback and
+    to cross-check. The raw TrackEval results ride along under "_raw" so mot_table can combine
+    sequences the way TrackEval does (sums of TP/FN/FP, not an average of per-clip scores)."""
     n_gt = sum(len(v) for v in gt.values())
     n_pred = sum(len(v) for v in pred.values())
+    base = {"gt_boxes": n_gt, "gt_ids": len({i for v in gt.values() for i in v}),
+            "pred_ids": len({i for v in pred.values() for i in v})}
+    metrics = _trackeval() if backend in ("auto", "trackeval") and iou_thr == 0.5 else None
+    if backend == "trackeval" and metrics is None:
+        raise ImportError("TrackEval is not installed: pip install --no-deps trackeval")
+    if metrics is not None:
+        data = _trackeval_data(gt, pred)
+        raw = {k: m.eval_sequence(data) for k, m in metrics.items()}
+        return {**base, **_from_trackeval(raw), "metrics_by": "TrackEval", "_raw": raw}
+    return {**base, **_simple_mot(gt, pred, iou_thr, n_gt, n_pred), "metrics_by": "simple"}
+
+
+def _simple_mot(gt, pred, iou_thr, n_gt, n_pred) -> dict:
+    """CLEAR-MOT MOTA, identity switches and IDF1. MOTA = 1 - (misses + false positives +
+    id switches) / ground-truth boxes. IDF1 is the F1 of boxes matched under the best one-to-one
+    mapping between ground-truth and predicted identities over the whole sequence."""
+    frames = sorted(set(gt) | set(pred))
     fp = fn = idsw = tp = 0
     last_match: dict[int, int] = {}
     gt_ids = sorted({i for v in gt.values() for i in v})
@@ -212,23 +271,33 @@ def mot_metrics(gt: dict[int, dict[int, list[float]]], pred: dict[int, dict[int,
     if overlap.size:
         r, c = linear_sum_assignment(-overlap)
         idtp = float(overlap[r, c].sum())
-    return {"gt_boxes": n_gt, "gt_ids": len(gt_ids), "pred_ids": len(pr_ids),
-            "mota": round(1 - (fn + fp + idsw) / n_gt, 3) if n_gt else None,
+    return {"hota": None, "mota": round(1 - (fn + fp + idsw) / n_gt, 3) if n_gt else None,
             "idf1": round(2 * idtp / (n_gt + n_pred), 3) if n_gt + n_pred else None,
             "id_switches": idsw, "recall": round(tp / n_gt, 3) if n_gt else None,
             "precision": round(tp / (tp + fp), 3) if tp + fp else None}
 
 
 def mot_table(per_sequence: dict[str, dict]) -> pd.DataFrame:
-    """One row per sequence plus a box-weighted overall row."""
+    """One row per sequence plus an overall row: TrackEval's own combination when every sequence
+    was scored by TrackEval, else a box-weighted mean."""
+    raws = {k: v.pop("_raw", None) for k, v in per_sequence.items()}
     df = pd.DataFrame(per_sequence).T
     if df.empty:
         return df
     w = df["gt_boxes"].astype(float)
-    overall = {c: round(float((df[c].astype(float) * w).sum() / w.sum()), 3) for c in ["mota", "idf1", "recall", "precision"]}
-    overall.update(gt_boxes=int(w.sum()), gt_ids=int(df["gt_ids"].sum()), pred_ids=int(df["pred_ids"].sum()),
-                   id_switches=int(df["id_switches"].sum()))
-    df.loc["overall"] = overall
+    overall = {}
+    metrics = _trackeval() if raws and all(r is not None for r in raws.values()) else None
+    if metrics is not None:
+        overall.update(_from_trackeval({k: m.combine_sequences({s: r[k] for s, r in raws.items()})
+                                        for k, m in metrics.items()}))
+        overall["metrics_by"] = "TrackEval"
+    else:
+        for c in ["hota", "mota", "idf1", "recall", "precision"]:
+            if c in df and df[c].notna().all() and w.sum():
+                overall[c] = round(float((df[c].astype(float) * w).sum() / w.sum()), 3)
+        overall["id_switches"] = int(df["id_switches"].sum())
+    overall.update(gt_boxes=int(w.sum()), gt_ids=int(df["gt_ids"].sum()), pred_ids=int(df["pred_ids"].sum()))
+    df.loc["overall"] = pd.Series(overall)
     return df
 
 
