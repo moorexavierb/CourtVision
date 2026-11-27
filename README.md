@@ -58,9 +58,11 @@ How leakage between training and scoring is kept out (`courtvision/training/sour
 ## Quick start (Colab)
 
 1. `notebooks/01_train_models.ipynb`: trains both models in one run, top to bottom. Thresholds
-   are tuned for tracking (player threshold by IDF1 on held-out SportsMOT clips) and saved to
-   `models/tuned_config.yaml`; a model is installed only if it beats the current one; part C
-   shows the pipeline's output on your clips before vs after.
+   are tuned for tracking (player threshold by HOTA on held-out SportsMOT clips, scored with
+   TrackEval) and saved to `models/tuned_config.yaml`; a model is installed only if it beats the
+   current one. Part C runs the real pipeline on held-out SportsMOT games (scored against their
+   tracks, with overlay videos and ID timelines) and on your own clips (sanity checks), and saves a
+   short tracking dataset per clip in `reports/clips_<RUN_TAG>/`.
 2. `notebooks/00_end_to_end_colab.ipynb`: run on a clip; shows diagnostics, the 10 Hz table, a top-down replay and the annotated video. Reads `models/tuned_config.yaml` when it exists.
 3. `notebooks/02_collect_frames_to_label.ipynb`: picks the frames of your clips the models get wrong and exports them with pre-labels for Roboflow; corrected, they feed back into 01.
 
